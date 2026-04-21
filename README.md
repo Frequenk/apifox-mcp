@@ -125,6 +125,43 @@ ps:我实际使用发现只有设置为文档发布才能正常操作项目
 
 ## 🐳 使用方法 (Docker)
 
+### Codex 团队推荐：使用 GHCR 镜像
+
+本项目的 GitHub Actions 会在 `main` 分支和 `v*` 标签推送时自动构建 Docker 镜像并发布到 GHCR。
+
+团队成员无需克隆源码，直接注册到 Codex 即可：
+
+```bash
+codex mcp add apifox \
+  --env APIFOX_TOKEN \
+  --env APIFOX_PROJECT_ID \
+  -- docker run -i --rm \
+    -e APIFOX_TOKEN \
+    -e APIFOX_PROJECT_ID \
+    ghcr.io/frequenk/apifox-mcp:latest
+```
+
+推荐生产或团队固定版本时使用 tag 镜像：
+
+```bash
+codex mcp add apifox \
+  --env APIFOX_TOKEN \
+  --env APIFOX_PROJECT_ID \
+  -- docker run -i --rm \
+    -e APIFOX_TOKEN \
+    -e APIFOX_PROJECT_ID \
+    ghcr.io/frequenk/apifox-mcp:v0.1.0
+```
+
+注册后可检查：
+
+```bash
+codex mcp list
+codex mcp get apifox
+```
+
+> 首次发布 GHCR 镜像后，请在 GitHub Packages 中确认镜像可见性。如果仓库公开，建议将 package 设置为 public，团队成员即可免登录拉取。
+
 ### 方法一：从源码构建
 
 ```bash
