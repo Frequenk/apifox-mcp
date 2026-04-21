@@ -29,7 +29,7 @@ mcp = FastMCP(
 # 环境变量配置
 # ============================================================
 APIFOX_TOKEN = os.getenv("APIFOX_TOKEN")  # Apifox 开放 API 令牌
-PROJECT_ID = os.getenv("APIFOX_PROJECT_ID")  # 目标项目 ID
+APIFOX_PROJECTS = os.getenv("APIFOX_PROJECTS")  # Apifox 项目列表，JSON 数组
 APIFOX_BASE_URL = os.getenv("APIFOX_BASE_URL")
 
 if (APIFOX_BASE_URL is None):

@@ -5,21 +5,22 @@
 提供目录（标签/文件夹）管理功能。
 """
 
-from ..config import mcp, logger, PROJECT_ID
-from ..utils import _validate_config, _make_request
+from ..config import mcp, logger
+from ..utils import _validate_config, _make_request, _resolve_project_id
 
 
 @mcp.tool()
-def list_folders() -> str:
-    """列出 Apifox 项目中的所有目录结构。"""
-    config_error = _validate_config()
+def list_folders(project_id: str) -> str:
+    """列出指定 Apifox 项目中的所有目录结构，project_id 必须来自 check_apifox_config 输出的项目列表。"""
+    config_error = _validate_config(project_id)
     if config_error:
         return config_error
+    resolved_project_id = _resolve_project_id(project_id)
     
     logger.info("正在获取目录列表...")
     
     export_payload = {"scope": {"type": "ALL"}, "options": {"includeApifoxExtensionProperties": True, "addFoldersToTags": True}, "oasVersion": "3.1", "exportFormat": "JSON"}
-    result = _make_request("POST", f"/projects/{PROJECT_ID}/export-openapi?locale=zh-CN", data=export_payload)
+    result = _make_request("POST", f"/projects/{resolved_project_id}/export-openapi?locale=zh-CN", data=export_payload)
     
     if not result["success"]:
         return f"❌ 获取目录列表失败: {result.get('error', '未知错误')}"
@@ -53,22 +54,23 @@ def list_folders() -> str:
 
 
 @mcp.tool()
-def delete_folder(folder_name: str, confirm: bool = False) -> str:
-    """删除 Apifox 项目中的目录（标签）。⚠️ 警告: 此操作不可撤销！"""
-    config_error = _validate_config()
+def delete_folder(project_id: str, folder_name: str, confirm: bool = False) -> str:
+    """删除指定 Apifox 项目中的目录（标签）。⚠️ 警告: 此操作不可撤销！"""
+    config_error = _validate_config(project_id)
     if config_error:
         return config_error
+    resolved_project_id = _resolve_project_id(project_id)
     
     if not confirm:
         return f"⚠️ 安全提示: 删除操作不可撤销!\n\n请确认要删除目录: {folder_name}\n\n如果确认删除，请将 confirm 参数设为 True:\ndelete_folder(folder_name=\"{folder_name}\", confirm=True)"
     
-    return f"⚠️ 公开 API 暂不支持直接删除目录\n\n请在 Apifox 客户端中手动删除目录: {folder_name}\n项目 ID: {PROJECT_ID}"
+    return f"⚠️ 公开 API 暂不支持直接删除目录\n\n请在 Apifox 客户端中手动删除目录: {folder_name}\n项目 ID: {resolved_project_id}"
 
 
 @mcp.tool() 
-def create_folder(folder_name: str, description: str = "") -> str:
-    """在 Apifox 项目中创建新目录（标签）。"""
-    config_error = _validate_config()
+def create_folder(project_id: str, folder_name: str, description: str = "") -> str:
+    """在指定 Apifox 项目中创建新目录（标签）。"""
+    config_error = _validate_config(project_id)
     if config_error:
         return config_error
     

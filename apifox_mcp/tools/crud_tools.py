@@ -19,8 +19,8 @@ CRUD 批量生成工具
 import json
 from typing import Optional, List, Dict
 
-from ..config import mcp, logger, PROJECT_ID, HTTP_STATUS_CODES
-from ..utils import _validate_config, _make_request, _build_openapi_spec
+from ..config import mcp, logger, HTTP_STATUS_CODES
+from ..utils import _validate_config, _make_request, _build_openapi_spec, _resolve_project_id
 
 
 # ============================================================
@@ -135,6 +135,7 @@ def _generate_item_example(schema: Dict, id_value: int = 1) -> Dict:
 
 @mcp.tool()
 def generate_crud_apis(
+    project_id: str,
     resource_name: str,
     resource_name_cn: str,
     base_path: str,
@@ -157,6 +158,7 @@ def generate_crud_apis(
     - DELETE {base_path}/{id}   删除资源
     
     Args:
+        project_id: 目标 Apifox 项目 ID，必须来自 check_apifox_config 输出的项目列表
         resource_name: 资源英文名称，如 "user", "order"
         resource_name_cn: 资源中文名称，如 "用户", "订单"
         base_path: 基础路径，如 "/api/v1/users"
@@ -197,9 +199,10 @@ def generate_crud_apis(
         ...     }
         ... )
     """
-    config_error = _validate_config()
+    config_error = _validate_config(project_id)
     if config_error:
         return config_error
+    resolved_project_id = _resolve_project_id(project_id)
     
     # 默认值
     if operations is None:
@@ -379,7 +382,7 @@ def generate_crud_apis(
     }
     
     logger.info(f"正在批量创建 {resource_name_cn} CRUD 接口...")
-    result = _make_request("POST", f"/projects/{PROJECT_ID}/import-openapi?locale=zh-CN", data=import_payload)
+    result = _make_request("POST", f"/projects/{resolved_project_id}/import-openapi?locale=zh-CN", data=import_payload)
     
     if not result["success"]:
         return f"❌ 创建失败: {result.get('error', '未知错误')}"

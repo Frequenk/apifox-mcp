@@ -8,21 +8,22 @@
 import json
 from typing import List
 
-from ..config import mcp, logger, PROJECT_ID, API_STATUS
-from ..utils import _validate_config, _make_request
+from ..config import mcp, logger, API_STATUS
+from ..utils import _validate_config, _make_request, _resolve_project_id
 
 
 @mcp.tool()
-def list_tags() -> str:
-    """列出项目中所有的标签及其接口数量。"""
-    config_error = _validate_config()
+def list_tags(project_id: str) -> str:
+    """列出指定 Apifox 项目中所有的标签及其接口数量，project_id 必须来自 check_apifox_config 输出的项目列表。"""
+    config_error = _validate_config(project_id)
     if config_error:
         return config_error
+    resolved_project_id = _resolve_project_id(project_id)
     
     logger.info("正在获取标签列表...")
     
     export_payload = {"scope": {"type": "ALL"}, "options": {"includeApifoxExtensionProperties": True}, "oasVersion": "3.1", "exportFormat": "JSON"}
-    result = _make_request("POST", f"/projects/{PROJECT_ID}/export-openapi?locale=zh-CN", data=export_payload)
+    result = _make_request("POST", f"/projects/{resolved_project_id}/export-openapi?locale=zh-CN", data=export_payload)
     
     if not result["success"]:
         return f"❌ 获取标签失败: {result.get('error', '未知错误')}"
@@ -61,16 +62,17 @@ def list_tags() -> str:
 
 
 @mcp.tool()
-def get_apis_by_tag(tag: str) -> str:
-    """获取指定标签下的所有接口。"""
-    config_error = _validate_config()
+def get_apis_by_tag(project_id: str, tag: str) -> str:
+    """获取指定 Apifox 项目中指定标签下的所有接口。"""
+    config_error = _validate_config(project_id)
     if config_error:
         return config_error
+    resolved_project_id = _resolve_project_id(project_id)
     
     logger.info(f"正在获取标签 '{tag}' 下的接口...")
     
     export_payload = {"scope": {"type": "ALL"}, "options": {"includeApifoxExtensionProperties": True}, "oasVersion": "3.1", "exportFormat": "JSON"}
-    result = _make_request("POST", f"/projects/{PROJECT_ID}/export-openapi?locale=zh-CN", data=export_payload)
+    result = _make_request("POST", f"/projects/{resolved_project_id}/export-openapi?locale=zh-CN", data=export_payload)
     
     if not result["success"]:
         return f"❌ 获取接口失败: {result.get('error', '未知错误')}"
@@ -96,11 +98,12 @@ def get_apis_by_tag(tag: str) -> str:
 
 
 @mcp.tool()
-def add_tag_to_api(path: str, method: str, tags: List[str]) -> str:
-    """为现有接口添加标签。"""
-    config_error = _validate_config()
+def add_tag_to_api(project_id: str, path: str, method: str, tags: List[str]) -> str:
+    """为指定 Apifox 项目中的现有接口添加标签。"""
+    config_error = _validate_config(project_id)
     if config_error:
         return config_error
+    resolved_project_id = _resolve_project_id(project_id)
     
     if not tags:
         return "⚠️ 请提供至少一个标签"
@@ -109,7 +112,7 @@ def add_tag_to_api(path: str, method: str, tags: List[str]) -> str:
     logger.info(f"正在为接口 {method_upper} {path} 设置标签: {tags}")
     
     export_payload = {"scope": {"type": "ALL"}, "options": {"includeApifoxExtensionProperties": True, "addFoldersToTags": False}, "oasVersion": "3.1", "exportFormat": "JSON"}
-    result = _make_request("POST", f"/projects/{PROJECT_ID}/export-openapi?locale=zh-CN", data=export_payload)
+    result = _make_request("POST", f"/projects/{resolved_project_id}/export-openapi?locale=zh-CN", data=export_payload)
     
     if not result["success"]:
         return f"❌ 获取接口失败: {result.get('error', '未知错误')}"
@@ -132,7 +135,7 @@ def add_tag_to_api(path: str, method: str, tags: List[str]) -> str:
     
     import_payload = {"input": json.dumps(openapi_spec), "options": {"targetEndpointFolderId": 0, "targetSchemaFolderId": 0, "endpointOverwriteBehavior": "OVERWRITE_EXISTING", "schemaOverwriteBehavior": "OVERWRITE_EXISTING"}}
     
-    result = _make_request("POST", f"/projects/{PROJECT_ID}/import-openapi?locale=zh-CN", data=import_payload)
+    result = _make_request("POST", f"/projects/{resolved_project_id}/import-openapi?locale=zh-CN", data=import_payload)
     
     if not result["success"]:
         return f"❌ 更新失败: {result.get('error', '未知错误')}"

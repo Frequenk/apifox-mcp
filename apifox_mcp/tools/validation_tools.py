@@ -8,8 +8,8 @@ API 一致性校验工具
 import re
 from typing import Optional, List, Dict
 
-from ..config import mcp, logger, PROJECT_ID
-from ..utils import _validate_config, _make_request
+from ..config import mcp, logger
+from ..utils import _validate_config, _make_request, _resolve_project_id
 
 
 # ============================================================
@@ -63,11 +63,12 @@ def _check_path_param_naming(segment: str) -> List[str]:
 
 
 @mcp.tool()
-def check_path_naming_convention(style: str = "kebab-case") -> str:
+def check_path_naming_convention(project_id: str, style: str = "kebab-case") -> str:
     """
     检查所有 API 路径是否符合命名规范。
     
     Args:
+        project_id: 目标 Apifox 项目 ID，必须来自 check_apifox_config 输出的项目列表
         style: 命名风格，可选值:
                - "kebab-case" (推荐): /user-profiles, /order-items
                - "snake_case": /user_profiles, /order_items
@@ -82,9 +83,10 @@ def check_path_naming_convention(style: str = "kebab-case") -> str:
     - 路径参数是否使用小写 {id} 而非 {ID}
     - 是否有混合使用不同风格的情况
     """
-    config_error = _validate_config()
+    config_error = _validate_config(project_id)
     if config_error:
         return config_error
+    resolved_project_id = _resolve_project_id(project_id)
     
     if style not in ["kebab-case", "snake_case", "camelCase"]:
         return f"❌ 不支持的命名风格: {style}，可选: kebab-case, snake_case, camelCase"
@@ -98,7 +100,7 @@ def check_path_naming_convention(style: str = "kebab-case") -> str:
         "exportFormat": "JSON"
     }
     
-    result = _make_request("POST", f"/projects/{PROJECT_ID}/export-openapi?locale=zh-CN", data=export_payload)
+    result = _make_request("POST", f"/projects/{resolved_project_id}/export-openapi?locale=zh-CN", data=export_payload)
     
     if not result["success"]:
         return f"❌ 获取失败: {result.get('error', '未知错误')}"
@@ -168,7 +170,7 @@ def check_path_naming_convention(style: str = "kebab-case") -> str:
 
 
 @mcp.tool()
-def check_response_consistency() -> str:
+def check_response_consistency(project_id: str) -> str:
     """
     检查所有 API 的响应格式是否统一。
     
@@ -177,13 +179,13 @@ def check_response_consistency() -> str:
         
     检查项：
     - 成功响应结构是否一致
-    - 是否都有 code/message/data 等标准字段
     - 分页响应是否使用统一字段名
     - 错误响应结构是否一致
     """
-    config_error = _validate_config()
+    config_error = _validate_config(project_id)
     if config_error:
         return config_error
+    resolved_project_id = _resolve_project_id(project_id)
     
     logger.info("正在检查 API 响应格式一致性...")
     
@@ -194,7 +196,7 @@ def check_response_consistency() -> str:
         "exportFormat": "JSON"
     }
     
-    result = _make_request("POST", f"/projects/{PROJECT_ID}/export-openapi?locale=zh-CN", data=export_payload)
+    result = _make_request("POST", f"/projects/{resolved_project_id}/export-openapi?locale=zh-CN", data=export_payload)
     
     if not result["success"]:
         return f"❌ 获取失败: {result.get('error', '未知错误')}"
@@ -304,9 +306,7 @@ def check_response_consistency() -> str:
     # 建议
     output.append("")
     output.append("━━━ 建议 ━━━")
-    output.append("💡 推荐使用统一的响应结构:")
-    output.append("   成功: {code, message, data}")
+    output.append("💡 建议团队按业务约定统一成功响应、分页字段和错误响应结构")
     output.append("   分页: {items, total, page, page_size}")
-    output.append("   错误: {code, message, details}")
     
     return "\n".join(output)

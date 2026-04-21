@@ -16,10 +16,10 @@ import json
 from typing import Optional, List, Dict
 
 from ..config import (
-    mcp, logger, PROJECT_ID, HTTP_METHODS, 
+    mcp, logger, HTTP_METHODS,
     HTTP_STATUS_CODES, API_STATUS
 )
-from ..utils import _validate_config, _make_request, _build_openapi_spec
+from ..utils import _validate_config, _make_request, _build_openapi_spec, _resolve_project_id
 
 
 # ============================================================
@@ -148,6 +148,7 @@ def _auto_fill_error_responses(responses: Optional[List[Dict]], method: str) -> 
 
 @mcp.tool()
 def list_api_endpoints(
+    project_id: str,
     folder_id: Optional[int] = None,
     status: Optional[str] = None,
     keyword: Optional[str] = None,
@@ -160,6 +161,7 @@ def list_api_endpoints(
     可以通过关键词进行筛选。
     
     Args:
+        project_id: 【必填】目标 Apifox 项目 ID，必须来自 check_apifox_config 输出的项目列表
         folder_id: (可选) 目录 ID 筛选 (暂不支持)
         status: (可选) 按状态筛选 (暂不支持)
         keyword: (可选) 按关键词搜索接口名称或路径
@@ -168,9 +170,10 @@ def list_api_endpoints(
     Returns:
         接口列表信息
     """
-    config_error = _validate_config()
+    config_error = _validate_config(project_id)
     if config_error:
         return config_error
+    resolved_project_id = _resolve_project_id(project_id)
     
     logger.info("正在通过导出 API 获取接口列表...")
     
@@ -183,7 +186,7 @@ def list_api_endpoints(
     
     result = _make_request(
         "POST", 
-        f"/projects/{PROJECT_ID}/export-openapi?locale=zh-CN",
+        f"/projects/{resolved_project_id}/export-openapi?locale=zh-CN",
         data=export_payload,
         use_public_api=True
     )
@@ -241,6 +244,7 @@ def list_api_endpoints(
 
 @mcp.tool()
 def create_api_endpoint(
+    project_id: str,
     title: str, 
     path: str, 
     method: str, 
@@ -271,6 +275,7 @@ def create_api_endpoint(
     ⚠️ 系统会自动添加标准错误响应（400/404/500），无需手动定义。
     
     Args:
+        project_id: 【必填】目标 Apifox 项目 ID，必须来自 check_apifox_config 输出的项目列表
         title: 【必填】接口中文业务名称
                ✅ 正确: "创建订单", "获取用户详情", "更新商品信息"
                ❌ 错误: "POST /orders", "createOrder", "get_user"
@@ -304,9 +309,7 @@ def create_api_endpoint(
                          }
                          
         response_example: 【必填】成功响应示例数据
-                          ⚠️ 必须是真实的、有意义的数据值！
-                          ❌ 错误: {"code": 0, "message": "string"}  ← 这是类型占位符
-                          ✅ 正确: {"code": 200, "message": "操作成功", "data": {"id": 10001}}
+                          ⚠️ 必须是真实的、有意义的数据值，按业务实际响应结构填写
                           示例: {"id": 10001, "status": "pending", "createdAt": "2024-01-01T12:00:00Z"}
                           
         folder_id: 目录 ID，默认 0 (根目录)
@@ -364,9 +367,10 @@ def create_api_endpoint(
         ...     response_example={"orderId": 10001, "status": "pending"}
         ... )
     """
-    config_error = _validate_config()
+    config_error = _validate_config(project_id)
     if config_error:
         return config_error
+    resolved_project_id = _resolve_project_id(project_id)
     
     method_upper = method.upper()
     if method_upper not in HTTP_METHODS:
@@ -384,7 +388,7 @@ def create_api_endpoint(
     
     check_result = _make_request(
         "POST", 
-        f"/projects/{PROJECT_ID}/export-openapi?locale=zh-CN",
+        f"/projects/{resolved_project_id}/export-openapi?locale=zh-CN",
         data=export_payload,
         use_public_api=True
     )
@@ -532,7 +536,7 @@ def create_api_endpoint(
     logger.info(f"正在创建接口: {method_upper} {path}")
     result = _make_request(
         "POST", 
-        f"/projects/{PROJECT_ID}/import-openapi?locale=zh-CN",
+        f"/projects/{resolved_project_id}/import-openapi?locale=zh-CN",
         data=import_payload
     )
     
@@ -563,6 +567,7 @@ def create_api_endpoint(
 
 @mcp.tool()
 def update_api_endpoint(
+    project_id: str,
     path: str,
     method: str,
     title: str,
@@ -592,6 +597,7 @@ def update_api_endpoint(
     5. POST/PUT/PATCH 必须提供 request_body_schema 和 request_body_example
     
     Args:
+        project_id: 【必填】目标 Apifox 项目 ID，必须来自 check_apifox_config 输出的项目列表
         path: 【必填】现有接口路径
         method: 【必填】现有接口的 HTTP 方法
         title: 【必填】接口中文业务名称
@@ -605,9 +611,10 @@ def update_api_endpoint(
     Returns:
         更新结果信息
     """
-    config_error = _validate_config()
+    config_error = _validate_config(project_id)
     if config_error:
         return config_error
+    resolved_project_id = _resolve_project_id(project_id)
     
     method_upper = method.upper()
     if method_upper not in HTTP_METHODS:
@@ -693,7 +700,7 @@ def update_api_endpoint(
     }
     
     logger.info(f"正在更新接口: {final_method} {final_path}")
-    result = _make_request("POST", f"/projects/{PROJECT_ID}/import-openapi?locale=zh-CN", data=import_payload)
+    result = _make_request("POST", f"/projects/{resolved_project_id}/import-openapi?locale=zh-CN", data=import_payload)
     
     if not result["success"]:
         return f"❌ 更新失败: {result.get('error', '未知错误')}"
@@ -711,26 +718,28 @@ def update_api_endpoint(
 
 
 @mcp.tool()
-def delete_api_endpoint(path: str, method: str, confirm: bool = False) -> str:
+def delete_api_endpoint(project_id: str, path: str, method: str, confirm: bool = False) -> str:
     """删除 Apifox 项目中的 HTTP 接口。⚠️ 此操作不可撤销！"""
-    config_error = _validate_config()
+    config_error = _validate_config(project_id)
     if config_error:
         return config_error
+    resolved_project_id = _resolve_project_id(project_id)
     
     method_upper = method.upper()
     
     if not confirm:
         return f"⚠️ 安全提示: 删除操作不可撤销!\n\n请确认要删除接口: {method_upper} {path}\n\n如确认删除，请设置 confirm=True"
     
-    return f"⚠️ 公开 API 暂不支持直接删除接口\n\n请在 Apifox 客户端中手动删除: {method_upper} {path}"
+    return f"⚠️ 公开 API 暂不支持直接删除接口\n\n请在 Apifox 客户端中手动删除: {method_upper} {path}\n项目 ID: {resolved_project_id}"
 
 
 @mcp.tool()
-def get_api_endpoint_detail(path: str, method: str) -> str:
+def get_api_endpoint_detail(project_id: str, path: str, method: str) -> str:
     """获取 HTTP 接口的详细信息。"""
-    config_error = _validate_config()
+    config_error = _validate_config(project_id)
     if config_error:
         return config_error
+    resolved_project_id = _resolve_project_id(project_id)
     
     method_lower = method.lower()
     logger.info(f"正在获取接口详情: {method.upper()} {path}")
@@ -742,7 +751,7 @@ def get_api_endpoint_detail(path: str, method: str) -> str:
         "exportFormat": "JSON"
     }
     
-    result = _make_request("POST", f"/projects/{PROJECT_ID}/export-openapi?locale=zh-CN", data=export_payload)
+    result = _make_request("POST", f"/projects/{resolved_project_id}/export-openapi?locale=zh-CN", data=export_payload)
     
     if not result["success"]:
         return f"❌ 获取失败: {result.get('error', '未知错误')}"

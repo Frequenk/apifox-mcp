@@ -10,7 +10,7 @@ import requests
 from typing import Optional, List, Dict, Any
 
 from .config import (
-    APIFOX_TOKEN, PROJECT_ID, APIFOX_PUBLIC_API, 
+    APIFOX_TOKEN, APIFOX_PROJECTS, APIFOX_PUBLIC_API,
     APIFOX_API_VERSION, HTTP_STATUS_CODES, logger
 )
 
@@ -117,7 +117,64 @@ def _get_headers() -> Dict[str, str]:
     }
 
 
-def _validate_config() -> Optional[str]:
+def _get_projects() -> List[Dict[str, str]]:
+    """
+    获取已配置的 Apifox 项目列表。
+
+    APIFOX_PROJECTS 格式:
+    [
+      {"name": "主项目", "id": "7575229"},
+      {"name": "测试项目", "id": "1234567"}
+    ]
+    """
+    if not APIFOX_PROJECTS:
+        return []
+
+    try:
+        parsed = json.loads(APIFOX_PROJECTS)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"APIFOX_PROJECTS 不是合法 JSON: {exc}") from exc
+
+    if not isinstance(parsed, list):
+        raise ValueError("APIFOX_PROJECTS 必须是 JSON 数组")
+
+    projects = []
+    for index, item in enumerate(parsed):
+        if not isinstance(item, dict):
+            raise ValueError(f"APIFOX_PROJECTS[{index}] 必须是对象")
+
+        project_id = str(item.get("id", "")).strip()
+        name = str(item.get("name", "")).strip()
+        if not project_id or not name:
+            raise ValueError(f"APIFOX_PROJECTS[{index}] 必须包含 name 和 id")
+
+        projects.append({"name": name, "id": project_id})
+
+    return projects
+
+
+def _format_project_options() -> str:
+    """格式化可用项目列表，供错误信息和工具说明使用。"""
+    projects = _get_projects()
+    if not projects:
+        return "未配置项目"
+    return "\n".join(f"   • {project['name']}: {project['id']}" for project in projects)
+
+
+def _resolve_project_id(project_id: str) -> str:
+    """校验并返回显式传入的 Apifox 项目 ID。"""
+    if not project_id or not str(project_id).strip():
+        raise ValueError("必须提供 project_id。可用项目:\n" + _format_project_options())
+
+    normalized = str(project_id).strip()
+    configured_ids = {project["id"] for project in _get_projects()}
+    if normalized not in configured_ids:
+        raise ValueError(f"未配置的 project_id: {normalized}\n可用项目:\n{_format_project_options()}")
+
+    return normalized
+
+
+def _validate_config(project_id: Optional[str] = None) -> Optional[str]:
     """
     验证环境变量配置
     
@@ -126,8 +183,16 @@ def _validate_config() -> Optional[str]:
     """
     if not APIFOX_TOKEN:
         return "❌ 错误: 缺少 APIFOX_TOKEN 环境变量，请在环境变量中设置你的 Apifox 访问令牌"
-    if not PROJECT_ID:
-        return "❌ 错误: 缺少 APIFOX_PROJECT_ID 环境变量，请在环境变量中设置目标项目 ID"
+
+    try:
+        projects = _get_projects()
+        if not projects:
+            return "❌ 错误: 缺少 APIFOX_PROJECTS 环境变量，请配置可用的 Apifox 项目列表"
+        if project_id is not None:
+            _resolve_project_id(project_id)
+    except ValueError as exc:
+        return f"❌ 错误: {exc}"
+
     return None
 
 

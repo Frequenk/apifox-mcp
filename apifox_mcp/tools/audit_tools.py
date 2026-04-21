@@ -7,8 +7,8 @@ API 响应审计工具
 
 from typing import Optional, List, Dict
 
-from ..config import mcp, logger, PROJECT_ID
-from ..utils import _validate_config, _make_request
+from ..config import mcp, logger
+from ..utils import _validate_config, _make_request, _resolve_project_id
 
 
 # ============================================================
@@ -101,7 +101,7 @@ def _check_response_completeness(api_responses: Dict, method: str) -> Dict:
 
 
 @mcp.tool()
-def check_api_responses(path: str, method: str) -> str:
+def check_api_responses(project_id: str, path: str, method: str) -> str:
     """
     检查单个 API 的响应体定义完整性。
     
@@ -111,15 +111,17 @@ def check_api_responses(path: str, method: str) -> str:
     - 5xx 错误: 500, 502, 503
     
     Args:
+        project_id: 目标 Apifox 项目 ID，必须来自 check_apifox_config 输出的项目列表
         path: 接口路径
         method: HTTP 方法
         
     Returns:
         响应完整性检查报告
     """
-    config_error = _validate_config()
+    config_error = _validate_config(project_id)
     if config_error:
         return config_error
+    resolved_project_id = _resolve_project_id(project_id)
     
     method_lower = method.lower()
     logger.info(f"正在检查接口响应完整性: {method.upper()} {path}")
@@ -131,7 +133,7 @@ def check_api_responses(path: str, method: str) -> str:
         "exportFormat": "JSON"
     }
     
-    result = _make_request("POST", f"/projects/{PROJECT_ID}/export-openapi?locale=zh-CN", data=export_payload)
+    result = _make_request("POST", f"/projects/{resolved_project_id}/export-openapi?locale=zh-CN", data=export_payload)
     
     if not result["success"]:
         return f"❌ 获取失败: {result.get('error', '未知错误')}"
@@ -202,6 +204,7 @@ def check_api_responses(path: str, method: str) -> str:
 
 @mcp.tool()
 def audit_all_api_responses(
+    project_id: str,
     tag: Optional[str] = None,
     show_complete: bool = False
 ) -> str:
@@ -214,15 +217,17 @@ def audit_all_api_responses(
     - 5xx 服务端错误: 500, 502, 503
     
     Args:
+        project_id: 目标 Apifox 项目 ID，必须来自 check_apifox_config 输出的项目列表
         tag: (可选) 只检查指定标签下的接口
         show_complete: 是否显示完整的接口，默认只显示不完整的
         
     Returns:
         审计报告，列出所有响应不完整的接口
     """
-    config_error = _validate_config()
+    config_error = _validate_config(project_id)
     if config_error:
         return config_error
+    resolved_project_id = _resolve_project_id(project_id)
     
     logger.info("正在审计所有 API 响应完整性...")
     
@@ -233,7 +238,7 @@ def audit_all_api_responses(
         "exportFormat": "JSON"
     }
     
-    result = _make_request("POST", f"/projects/{PROJECT_ID}/export-openapi?locale=zh-CN", data=export_payload)
+    result = _make_request("POST", f"/projects/{resolved_project_id}/export-openapi?locale=zh-CN", data=export_payload)
     
     if not result["success"]:
         return f"❌ 获取失败: {result.get('error', '未知错误')}"

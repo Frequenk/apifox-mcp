@@ -95,16 +95,25 @@
 | 环境变量 | 描述 | 获取方式 |
 | :--- | :--- | :--- |
 | `APIFOX_TOKEN` | Apifox 开放 API 令牌 | Apifox 客户端 -> 账号设置 -> API 访问令牌 |
-| `APIFOX_PROJECT_ID` | 目标项目 ID | 项目概览页 -> 项目设置 -> 基本设置 -> ID |
+| `APIFOX_PROJECTS` | 可用项目列表，JSON 数组 | 项目概览页 -> 项目设置 -> 基本设置 -> ID |
 
 ## 重点⚠️
 ### APIFOX_TOKEN获取方式
 <img width="1594" height="1029" alt="截屏2025-12-17 01 58 51" src="https://github.com/user-attachments/assets/aad5da36-a99d-484b-959c-116918897487" />
 
 
-### APIFOX_PROJECT_ID获取方式
+### APIFOX_PROJECTS 获取方式
 
 <img width="2032" height="1167" alt="截屏2025-12-17 01 57 06" src="https://github.com/user-attachments/assets/a381baf8-7da0-4d88-950c-ac8b78c7af8d" />
+
+`APIFOX_PROJECTS` 需要配置为 JSON 数组，支持多个项目：
+
+```bash
+export APIFOX_PROJECTS='[
+  {"name":"主项目","id":"7575229"},
+  {"name":"测试项目","id":"1234567"}
+]'
+```
 
 
 ### 设置项目文档为公开
@@ -121,7 +130,7 @@ ps:我实际使用发现只有设置为文档发布才能正常操作项目
 | 环境变量 | 描述 | 获取方式 |
 | :--- | :--- | :--- |
 | `APIFOX_TOKEN` | Apifox 开放 API 令牌 | Apifox 客户端 -> 账号设置 -> API 访问令牌 |
-| `APIFOX_PROJECT_ID` | 目标项目 ID | 项目概览页 -> 项目设置 -> 基本设置 -> ID |
+| `APIFOX_PROJECTS` | 可用项目列表，JSON 数组 | 项目概览页 -> 项目设置 -> 基本设置 -> ID |
 
 ## 🐳 使用方法 (Docker)
 
@@ -129,35 +138,85 @@ ps:我实际使用发现只有设置为文档发布才能正常操作项目
 
 本项目的 GitHub Actions 会在 `main` 分支和 `v*` 标签推送时自动构建 Docker 镜像并发布到 GHCR。
 
-团队成员无需克隆源码，直接注册到 Codex 即可：
+团队成员无需克隆源码，先在当前终端设置环境变量：
+
+```bash
+export APIFOX_TOKEN="your_token_here"
+export APIFOX_PROJECTS='[{"name":"主项目","id":"7575229"},{"name":"测试项目","id":"1234567"}]'
+```
+
+然后直接注册到 Codex 即可：
 
 ```bash
 codex mcp add apifox \
-  --env APIFOX_TOKEN \
-  --env APIFOX_PROJECT_ID \
-  -- docker run -i --rm \
+  --env APIFOX_TOKEN="$APIFOX_TOKEN" \
+  --env APIFOX_PROJECTS="$APIFOX_PROJECTS" \
+  --env MCP_CLIENT_NAME="codex" \
+  -- sh -lc '
+client="${MCP_CLIENT_NAME:-codex}"
+workspace="$(basename "$PWD" | tr -cs "A-Za-z0-9_.-" "-" | tr "[:upper:]" "[:lower:]" | sed "s/^-//;s/-$//")"
+suffix="$(openssl rand -hex 2 2>/dev/null || LC_ALL=C tr -dc "a-z0-9" </dev/urandom | head -c 4)"
+docker run -i --rm \
+    --name "apifox_mcp-${client}-${workspace:-workspace}-${suffix}" \
+    --label app=apifox-mcp \
+    --label mcp.client="$client" \
+    --label mcp.workspace="${workspace:-workspace}" \
     -e APIFOX_TOKEN \
-    -e APIFOX_PROJECT_ID \
+    -e APIFOX_PROJECTS \
     ghcr.io/frequenk/apifox-mcp:latest
+'
 ```
 
 推荐生产或团队固定版本时使用 tag 镜像：
 
 ```bash
 codex mcp add apifox \
-  --env APIFOX_TOKEN \
-  --env APIFOX_PROJECT_ID \
-  -- docker run -i --rm \
+  --env APIFOX_TOKEN="$APIFOX_TOKEN" \
+  --env APIFOX_PROJECTS="$APIFOX_PROJECTS" \
+  --env MCP_CLIENT_NAME="codex" \
+  -- sh -lc '
+client="${MCP_CLIENT_NAME:-codex}"
+workspace="$(basename "$PWD" | tr -cs "A-Za-z0-9_.-" "-" | tr "[:upper:]" "[:lower:]" | sed "s/^-//;s/-$//")"
+suffix="$(openssl rand -hex 2 2>/dev/null || LC_ALL=C tr -dc "a-z0-9" </dev/urandom | head -c 4)"
+docker run -i --rm \
+    --name "apifox_mcp-${client}-${workspace:-workspace}-${suffix}" \
+    --label app=apifox-mcp \
+    --label mcp.client="$client" \
+    --label mcp.workspace="${workspace:-workspace}" \
     -e APIFOX_TOKEN \
-    -e APIFOX_PROJECT_ID \
+    -e APIFOX_PROJECTS \
     ghcr.io/frequenk/apifox-mcp:v0.1.0
+'
 ```
+
+> `codex mcp add --env` 需要使用 `KEY=VALUE` 形式。如果希望长期生效，可将上面的 `export` 写入 `~/.zshrc` 或 `~/.bashrc`。容器名格式为 `apifox_mcp-{工具名}-{启动目录名}-{四位随机码}`，并带有 `app=apifox-mcp` label。
 
 注册后可检查：
 
 ```bash
 codex mcp list
 codex mcp get apifox
+```
+
+如需更新到最新镜像：
+
+```bash
+docker pull ghcr.io/frequenk/apifox-mcp:latest
+codex mcp remove apifox
+```
+
+然后重新执行上面的 `codex mcp add apifox ...` 注册命令。已经运行中的 Codex/AI Agent 会继续使用旧容器，关闭对应会话后再重新启动即可使用新镜像。
+
+如需卸载或重新配置该 MCP：
+
+```bash
+codex mcp remove apifox
+```
+
+如需同时清理本地 Docker 镜像缓存：
+
+```bash
+docker rmi ghcr.io/frequenk/apifox-mcp:latest
 ```
 
 > 首次发布 GHCR 镜像后，请在 GitHub Packages 中确认镜像可见性。如果仓库公开，建议将 package 设置为 public，团队成员即可免登录拉取。
@@ -196,12 +255,12 @@ docker load -i apifox-mcp.tar
         "-i",
         "--rm",
         "-e", "APIFOX_TOKEN",
-        "-e", "APIFOX_PROJECT_ID",
+        "-e", "APIFOX_PROJECTS",
         "apifox-mcp"
       ],
       "env": {
         "APIFOX_TOKEN": "your_token_here",
-        "APIFOX_PROJECT_ID": "your_project_id_here"
+        "APIFOX_PROJECTS": "[{\"name\":\"主项目\",\"id\":\"7575229\"}]"
       }
     }
   }
@@ -225,7 +284,7 @@ docker load -i apifox-mcp.tar
       ],
       "env": {
         "APIFOX_TOKEN": "your_token_here",
-        "APIFOX_PROJECT_ID": "your_project_id_here"
+        "APIFOX_PROJECTS": "[{\"name\":\"主项目\",\"id\":\"7575229\"}]"
       }
     }
   }
@@ -233,7 +292,7 @@ docker load -i apifox-mcp.tar
 ```
 
 > **注意**: 
-> - 请将 `your_token_here` 和 `your_project_id_here` 替换为你的实际凭证
+> - 请将 `your_token_here` 和 `APIFOX_PROJECTS` 中的项目名称、项目 ID 替换为你的实际凭证
 > - 使用 uv 方式时，请将 `/path/to/apifox-mcp` 替换为实际的项目路径
 
 ### 3. 命令行运行 (可选)
@@ -244,7 +303,7 @@ docker load -i apifox-mcp.tar
 # 使用环境变量
 docker run -i --rm \
   -e APIFOX_TOKEN=your_token \
-  -e APIFOX_PROJECT_ID=your_project_id \
+  -e APIFOX_PROJECTS='[{"name":"主项目","id":"7575229"}]' \
   apifox-mcp
 
 # 或者使用 .env 文件
