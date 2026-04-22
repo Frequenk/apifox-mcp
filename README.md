@@ -10,7 +10,7 @@
 
 这是一个基于 [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) 的服务器，用于通过 LLM (如 Claude) 直接管理 [Apifox](https://apifox.com/) 项目。
 
-它允许你通过自然语言指令来查看、创建、安全更新、批量处理和删除/恢复 Apifox 中的 API 接口、数据模型 (Schema)、文件夹等，并能检查 API 定义的完整性。核心目标是让 AI 在改接口文档时尽量使用轻量上下文、局部修改和写后复核，减少误删、误覆盖和上下文浪费。
+它允许你通过自然语言指令来查看、创建、安全更新和批量处理 Apifox 中的 API 接口、数据模型 (Schema)、文件夹等，并能检查 API 定义的完整性。核心目标是让 AI 在改接口文档时尽量使用轻量上下文、局部修改和写后复核，减少误覆盖和上下文浪费。删除操作不由 MCP 执行，工具只会提示需要在 Apifox 客户端手动删除哪些资源。
 
 ## ✨ 功能特性
 
@@ -23,20 +23,18 @@
     *   安全更新接口元信息 (`patch_api_endpoint_metadata`) - 只改名称、描述、标签并保留原内容
     *   批量安全修改接口名称 (`batch_patch_api_endpoint_titles`) - 只改名称并做写后复核
     *   全量替换接口 (`update_api_endpoint`) - 需要 `confirm_replace=True`
-    *   删除接口 (`delete_api_endpoint`) - 删除前记录 before 快照
     *   接口完整性检查 (`check_api_responses`, `audit_all_api_responses`)
 *   **批量操作与操作日志**:
-    *   统一批量执行 (`batch_execute`) - 支持 endpoint/schema/folder 的 create/update/patch/delete
+    *   统一批量执行 (`batch_execute`) - 支持 endpoint/schema/folder 的 create/update/patch；delete 请求只返回手动删除指引，不执行删除
     *   操作日志列表 (`list_operation_logs`) - 查看最近写操作、状态和目标
-    *   撤销写操作 (`undo_operation`) - 根据日志尝试恢复 create/update/patch/delete
+    *   撤销写操作 (`undo_operation`) - 根据日志尝试恢复 update/patch；create 只能提示手动删除创建的资源
 *   **数据模型 (Schema) 管理**:
     *   列出模型 (`list_schemas`)
     *   获取模型详情 (`get_schema_detail`)
     *   创建模型 (`create_schema`)
     *   更新模型 (`update_schema`)
-    *   删除模型 (`delete_schema`) - 删除前记录 before 快照
 *   **其他管理**:
-    *   目录管理 (`list_folders`, `create_folder`, `delete_folder`)
+    *   目录管理 (`list_folders`, `create_folder`)
     *   标签管理 (`list_tags`)
     *   按标签获取接口 (`get_apis_by_tag`, `add_tag_to_api`)
     *   配置检查 (`check_apifox_config`)
@@ -105,6 +103,8 @@
 | `APIFOX_TOKEN` | Apifox 开放 API 令牌 | Apifox 客户端 -> 账号设置 -> API 访问令牌 |
 | `APIFOX_PROJECTS` | 可用项目列表，JSON 数组 | 项目概览页 -> 项目设置 -> 基本设置 -> ID |
 | `APIFOX_MCP_LOG_DIR` | 操作日志目录，默认 `.apifox-mcp-logs` | 可选；建议 Docker 场景挂载持久化目录 |
+
+> 修改 `APIFOX_TOKEN` 或 `APIFOX_PROJECTS` 后，已经启动的 MCP server 不会自动读取新值。请重启终端和 AI/Codex 会话；如果是通过 `codex mcp add --env ...` 注册的，还需要先 `codex mcp remove apifox`，再用新的环境变量重新执行 `codex mcp add apifox ...`。
 
 ## 重点⚠️
 ### APIFOX_TOKEN获取方式
@@ -187,7 +187,7 @@ docker run -i --rm \
 '
 ```
 
-> `codex mcp add --env` 需要使用 `KEY=VALUE` 形式。如果希望长期生效，可将上面的 `export` 写入 `~/.zshrc` 或 `~/.bashrc`。容器名格式为 `apifox-mcp_{工具名}_{启动目录名}_{四位随机码}`，并带有 `app=apifox-mcp` label。
+> `codex mcp add --env` 需要使用 `KEY=VALUE` 形式。如果希望长期生效，可将上面的 `export` 写入 `~/.zshrc` 或 `~/.bashrc`。修改 `.zshrc`、`.bashrc` 或当前 shell 中的环境变量后，需要重启终端；已经运行中的 MCP server/容器不会自动刷新环境变量。若已注册过 MCP，请 `codex mcp remove apifox` 后重新执行 `codex mcp add apifox ...`。容器名格式为 `apifox-mcp_{工具名}_{启动目录名}_{四位随机码}`，并带有 `app=apifox-mcp` label。
 
 注册后可检查：
 
@@ -204,6 +204,8 @@ codex mcp remove apifox
 ```
 
 然后重新执行上面的 `codex mcp add apifox ...` 注册命令。已经运行中的 Codex/AI Agent 会继续使用旧容器，关闭对应会话后再重新启动即可使用新镜像。
+
+同理，更新 `APIFOX_PROJECTS`、`APIFOX_TOKEN` 等环境变量后，也需要关闭当前 Codex/AI 会话，重新打开终端并重新注册 MCP，才能让新项目列表生效。可用 `check_apifox_config` 确认 MCP 实际读取到的项目数量。
 
 如需卸载或重新配置该 MCP：
 
@@ -292,6 +294,7 @@ docker load -i apifox-mcp.tar
 > **注意**: 
 > - 请将 `your_token_here` 和 `APIFOX_PROJECTS` 中的项目名称、项目 ID 替换为你的实际凭证
 > - 使用 uv 方式时，请将 `/path/to/apifox-mcp` 替换为实际的项目路径
+> - 更新环境变量后要重启终端和 MCP 进程；Codex 注册方式还需要重新 `codex mcp remove` / `codex mcp add`
 
 ### 3. 命令行运行 (可选)
 
@@ -356,9 +359,11 @@ batch_execute(project_id, items=[...])
 
 支持的组合：
 
-- endpoint: `create` / `update` / `patch` / `delete`
-- schema: `create` / `update` / `delete`
-- folder: `create` / `delete`
+- endpoint: `create` / `update` / `patch`
+- schema: `create` / `update`
+- folder: `create`
+
+如果传入 `delete` 操作，MCP 不会调用 Apifox 删除 API，只会返回“请在 Apifox 客户端手动删除”的目标提示，并在批量汇总中计为失败，避免误判为已删除。
 
 执行策略：
 
@@ -367,35 +372,28 @@ batch_execute(project_id, items=[...])
 - 返回每个子操作的关键输出，包括写后复核、操作日志 ID 或失败原因。
 - 支持 `dry_run=True` 做全局紧凑预览：只做参数校验和操作摘要，不调用真实写入工具，不返回完整 OpenAPI。
 
-### 删除与恢复
+### 操作日志与恢复
 
-删除工具包括：
-
-- `delete_api_endpoint`
-- `delete_schema`
-- `delete_folder`
-
-删除前会记录 before 快照。所有写操作都会生成本地操作日志，可使用：
+所有写操作都会生成本地操作日志，可使用：
 
 - `list_operation_logs(project_id, limit)`
 - `undo_operation(operation_id)`
 
 `undo_operation` 会根据日志尝试恢复：
 
-- create: 删除创建的资源
+- create: 不自动删除资源，只提示应在 Apifox 客户端手动删除的目标
 - update/patch: 使用 before 快照重新导入
-- delete: 使用 before 快照重新导入恢复
 
-接口撤销会优先使用日志中保存的 operation 和 components 上下文恢复，避免只恢复 operation 而丢失 schema 引用。删除工具写入后会再导出一次目标项目做复核；如果 Apifox 公开 API 没有真正删除目标，会返回明确的“未实际删除”提示，并把日志状态标记为 failed。
+接口撤销会优先使用日志中保存的 operation 和 components 上下文恢复，避免只恢复 operation 而丢失 schema 引用。
 
 ## ⚠️ 能力边界
 
 - 批量只读名称、描述、标签、参数数量、响应码时，优先使用 `batch_get_api_endpoint_summaries`，避免把完整 schema/components 塞进上下文。
-- 批量修改接口名称时，可以使用 `batch_patch_api_endpoint_titles`；更通用的批量 create/update/patch/delete 使用 `batch_execute`。
+- 批量修改接口名称时，可以使用 `batch_patch_api_endpoint_titles`；更通用的批量 create/update/patch 使用 `batch_execute`。
 - 修改旧接口的名称、描述或标签时，优先使用 `patch_api_endpoint_metadata`，该工具会保留原参数、请求体、响应、示例和组件引用。
 - `update_api_endpoint` 是全量替换工具，默认会拒绝执行；只有确认要重建完整接口时才设置 `confirm_replace=True`。
 - 修改旧接口前建议先调用 `get_api_endpoint_snapshot` 查看完整结构化快照。
-- 删除能力通过 OpenAPI 导出、移除目标、再导入覆盖来尝试实现，并会做删除后复核。若 Apifox 公开 API 未真正删除目标，请在 Apifox 客户端中手动删除；操作日志仍会保留 before 快照。
+- MCP 不执行删除。需要删除接口、数据模型或目录时，请先用轻量查询工具列出目标，再在 Apifox 客户端中手动删除。
 - 恢复能力依赖操作日志和 Apifox 导入能力。接口恢复会携带日志中的 components 上下文；如果引用的外部资源未在日志中出现，可能需要人工补齐。
 - 默认操作日志目录为 `.apifox-mcp-logs`。容器或团队环境建议通过 `APIFOX_MCP_LOG_DIR` 指向持久化目录。
 - 写操作可优先使用 `dry_run=True` 预览。预览默认返回紧凑摘要，不返回完整 OpenAPI，避免占用过多上下文。
