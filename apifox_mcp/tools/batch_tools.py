@@ -2,7 +2,7 @@
 统一批量写操作工具
 ==================
 
-按顺序执行接口、Schema、目录的创建/更新/删除操作。
+按顺序执行接口、Schema、目录的创建/更新/局部更新操作。
 """
 
 from typing import Any, Dict, List
@@ -79,6 +79,8 @@ def _execute_one(project_id: str, operation: str, resource_type: str, item: Dict
 
 
 def _execute_endpoint(project_id: str, operation: str, item: Dict[str, Any]) -> str:
+    if operation == "delete":
+        return _manual_delete_guidance("endpoint", item)
     if operation == "create":
         return api_tools.create_api_endpoint(project_id=project_id, **_without_control_fields(item))
     if operation == "update":
@@ -95,49 +97,42 @@ def _execute_endpoint(project_id: str, operation: str, item: Dict[str, Any]) -> 
             tags=item.get("tags"),
             dry_run=bool(item.get("dry_run", False)),
         )
-    if operation == "delete":
-        return api_tools.delete_api_endpoint(
-            project_id=project_id,
-            path=item.get("path", ""),
-            method=item.get("method", "GET"),
-            confirm=True,
-        )
     return f"❌ 不支持的 endpoint 操作: {operation}"
 
 
 def _execute_schema(project_id: str, operation: str, item: Dict[str, Any]) -> str:
+    if operation == "delete":
+        return _manual_delete_guidance("schema", item)
     if operation == "create":
         return schema_tools.create_schema(project_id=project_id, **_without_control_fields(item))
     if operation == "update":
         return schema_tools.update_schema(project_id=project_id, **_without_control_fields(item))
-    if operation == "delete":
-        return schema_tools.delete_schema(project_id=project_id, name=item.get("name", ""), confirm=True)
     return f"❌ 不支持的 schema 操作: {operation}"
 
 
 def _execute_folder(project_id: str, operation: str, item: Dict[str, Any]) -> str:
+    if operation == "delete":
+        return _manual_delete_guidance("folder", item)
     if operation == "create":
         return folder_tools.create_folder(
             project_id=project_id,
             folder_name=item.get("folder_name", ""),
             description=item.get("description", ""),
         )
-    if operation == "delete":
-        return folder_tools.delete_folder(project_id=project_id, folder_name=item.get("folder_name", ""), confirm=True)
     return f"❌ 不支持的 folder 操作: {operation}"
 
 
 def _validate_item(operation: str, resource_type: str, item: Dict[str, Any]) -> List[str]:
+    if operation == "delete":
+        return ["MCP 不执行删除，请在 Apifox 客户端手动删除"]
+
     required_fields = {
         ("endpoint", "create"): ["title", "path", "method", "description", "response_schema", "response_example"],
         ("endpoint", "update"): ["path", "method", "title", "description", "response_schema", "response_example", "confirm_replace"],
         ("endpoint", "patch"): ["path", "method"],
-        ("endpoint", "delete"): ["path", "method"],
         ("schema", "create"): ["name", "schema_type"],
         ("schema", "update"): ["name"],
-        ("schema", "delete"): ["name"],
         ("folder", "create"): ["folder_name"],
-        ("folder", "delete"): ["folder_name"],
     }
     required = required_fields.get((resource_type, operation))
     if required is None:
@@ -149,6 +144,11 @@ def _validate_item(operation: str, resource_type: str, item: Dict[str, Any]) -> 
     return missing
 
 
+def _manual_delete_guidance(resource_type: str, item: Dict[str, Any]) -> str:
+    target = _describe_item("delete", resource_type, item)
+    return f"❌ MCP 不执行删除操作。请在 Apifox 客户端手动删除: {resource_type} {target}"
+
+
 def _without_control_fields(item: Dict[str, Any]) -> Dict[str, Any]:
     return {
         key: value
@@ -158,7 +158,13 @@ def _without_control_fields(item: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _is_success(result: str) -> bool:
-    return not result.startswith("❌") and not result.startswith("🚫") and "失败" not in _first_line(result)
+    first = _first_line(result)
+    return (
+        not result.startswith("❌")
+        and not result.startswith("🚫")
+        and not result.startswith("⚠️")
+        and "失败" not in first
+    )
 
 
 def _first_line(result: str) -> str:

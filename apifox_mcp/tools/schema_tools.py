@@ -5,7 +5,6 @@
 提供数据模型的 CRUD 操作。
 """
 
-import copy
 import json
 from typing import Optional, List, Dict
 
@@ -178,98 +177,6 @@ def update_schema(project_id: str, name: str, new_name: Optional[str] = None, de
     )
     logger.info(f"数据模型{action}成功: {final_name}")
     return f"✅ 数据模型{action}成功!\n\n📦 模型信息:\n   • 名称: {final_name}\n   • 类型: {schema_type}\n   • 操作日志: {log_entry['id']}"
-
-
-@mcp.tool()
-def delete_schema(project_id: str, name: str, confirm: bool = False) -> str:
-    """删除指定 Apifox 项目中的数据模型 (Schema)，并记录操作日志。"""
-    config_error = _validate_config(project_id)
-    if config_error:
-        return config_error
-    resolved_project_id = _resolve_project_id(project_id)
-
-    if not confirm:
-        return f"⚠️ 安全提示: 删除操作不可撤销!\n\n请确认要删除模型: {name}\n\n如果确认删除，请将 confirm 参数设为 True:\ndelete_schema(name=\"{name}\", confirm=True)"
-
-    try:
-        openapi_data = _export_openapi(resolved_project_id)
-        before = _snapshot_schema(openapi_data, name)
-    except (RuntimeError, KeyError) as exc:
-        return f"❌ 删除失败: {exc}"
-
-    delete_spec = copy.deepcopy(openapi_data)
-    delete_spec.setdefault("components", {}).setdefault("schemas", {}).pop(name, None)
-    import_spec = {
-        "openapi": "3.0.0",
-        "info": delete_spec.get("info", {"title": "Apifox API", "version": "1.0.0"}),
-        "paths": delete_spec.get("paths", {}),
-        "components": delete_spec.get("components", {}),
-    }
-    if delete_spec.get("tags"):
-        import_spec["tags"] = delete_spec["tags"]
-
-    import_payload = {
-        "input": json.dumps(import_spec),
-        "options": {
-            "targetEndpointFolderId": 0,
-            "targetSchemaFolderId": 0,
-            "endpointOverwriteBehavior": "OVERWRITE_EXISTING",
-            "schemaOverwriteBehavior": "OVERWRITE_EXISTING",
-        },
-    }
-    result = _make_request("POST", f"/projects/{resolved_project_id}/import-openapi?locale=zh-CN", data=import_payload)
-    if not result["success"]:
-        operation_logger.record(
-            operation="delete",
-            resource_type="schema",
-            project_id=resolved_project_id,
-            target={"name": name},
-            before=before,
-            after=None,
-            status="failed",
-            error=result.get("error", "未知错误"),
-        )
-        return f"❌ 删除失败: {result.get('error', '未知错误')}"
-
-    try:
-        after_openapi_data = _export_openapi(resolved_project_id)
-        _snapshot_schema(after_openapi_data, name)
-        verify_error = "删除后复核失败: 目标仍存在"
-        log_entry = operation_logger.record(
-            operation="delete",
-            resource_type="schema",
-            project_id=resolved_project_id,
-            target={"name": name},
-            before=before,
-            after=None,
-            status="failed",
-            error=verify_error,
-        )
-        return f"⚠️ 数据模型删除请求已提交，但未实际删除\n\n📦 模型信息:\n   • 名称: {name}\n   • 操作日志: {log_entry['id']}\n\n写后复核:\n   • {verify_error}\n\n请在 Apifox 客户端中手动删除，或检查 Apifox OpenAPI 导入覆盖策略。"
-    except KeyError:
-        pass
-    except RuntimeError as exc:
-        log_entry = operation_logger.record(
-            operation="delete",
-            resource_type="schema",
-            project_id=resolved_project_id,
-            target={"name": name},
-            before=before,
-            after=None,
-            status="failed",
-            error=f"删除后复核失败: {exc}",
-        )
-        return f"⚠️ 数据模型删除请求已提交，但写后复核失败: {exc}\n\n操作日志: {log_entry['id']}"
-
-    log_entry = operation_logger.record(
-        operation="delete",
-        resource_type="schema",
-        project_id=resolved_project_id,
-        target={"name": name},
-        before=before,
-        after=None,
-    )
-    return f"✅ 数据模型删除请求已提交\n\n📦 模型信息:\n   • 名称: {name}\n   • 操作日志: {log_entry['id']}\n\n⚠️ 如果 Apifox 未删除该模型，请在客户端中手动删除。"
 
 
 @mcp.tool()

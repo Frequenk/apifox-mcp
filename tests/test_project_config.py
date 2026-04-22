@@ -223,64 +223,16 @@ class ProjectConfigTests(unittest.TestCase):
             self.assertEqual(len(logs), 1)
             self.assertEqual(logs[0]["target"]["path"], "/orders")
 
-    def test_delete_api_endpoint_records_before_snapshot(self):
+    def test_delete_tools_are_not_registered(self):
         os.environ["APIFOX_TOKEN"] = "token"
         os.environ["APIFOX_PROJECTS"] = '[{"name":"主项目","id":"7575229"}]'
-        module = importlib.import_module("apifox_mcp.tools.api_tools")
-        log_module = importlib.import_module("apifox_mcp.operation_log")
-        openapi_data = make_openapi_fixture()
-        imports = []
+        api_module = importlib.import_module("apifox_mcp.tools.api_tools")
+        schema_module = importlib.import_module("apifox_mcp.tools.schema_tools")
+        folder_module = importlib.import_module("apifox_mcp.tools.folder_tools")
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            module.operation_logger = log_module.OperationLog(log_dir=tmpdir)
-
-            def fake_request(method, endpoint, data=None, params=None, use_public_api=True):
-                if endpoint.endswith("/export-openapi?locale=zh-CN"):
-                    return {"success": True, "data": deepcopy(openapi_data)}
-                if endpoint.endswith("/import-openapi?locale=zh-CN"):
-                    imported = json_loads(data["input"])
-                    imports.append(imported)
-                    self.assertNotIn("post", imported["paths"].get("/orders", {}))
-                    return {"success": True, "data": {"data": {"counters": {"endpointDeleted": 1}}}}
-                raise AssertionError(endpoint)
-
-            module._make_request = fake_request
-
-            result = module.delete_api_endpoint("7575229", "/orders", "POST", confirm=True)
-
-            self.assertIn("接口删除请求已提交", result)
-            self.assertEqual(len(imports), 1)
-            logs = module.operation_logger.list_logs(project_id="7575229")
-            self.assertEqual(len(logs), 1)
-            self.assertEqual(logs[0]["operation"], "delete")
-            self.assertEqual(logs[0]["before"]["summary"], "旧标题")
-            self.assertIsNone(logs[0]["after"])
-
-    def test_delete_api_endpoint_warns_when_post_verify_still_exists(self):
-        os.environ["APIFOX_TOKEN"] = "token"
-        os.environ["APIFOX_PROJECTS"] = '[{"name":"主项目","id":"7575229"}]'
-        module = importlib.import_module("apifox_mcp.tools.api_tools")
-        log_module = importlib.import_module("apifox_mcp.operation_log")
-        openapi_data = make_openapi_fixture()
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            module.operation_logger = log_module.OperationLog(log_dir=tmpdir)
-
-            def fake_request(method, endpoint, data=None, params=None, use_public_api=True):
-                if endpoint.endswith("/export-openapi?locale=zh-CN"):
-                    return {"success": True, "data": deepcopy(openapi_data)}
-                if endpoint.endswith("/import-openapi?locale=zh-CN"):
-                    return {"success": True, "data": {"data": {"counters": {"endpointDeleted": 0}}}}
-                raise AssertionError(endpoint)
-
-            module._make_request = fake_request
-
-            result = module.delete_api_endpoint("7575229", "/orders", "POST", confirm=True)
-
-            self.assertIn("未实际删除", result)
-            logs = module.operation_logger.list_logs(project_id="7575229")
-            self.assertEqual(logs[0]["status"], "failed")
-            self.assertIn("目标仍存在", logs[0]["error"])
+        self.assertFalse(hasattr(api_module, "delete_api_endpoint"))
+        self.assertFalse(hasattr(schema_module, "delete_schema"))
+        self.assertFalse(hasattr(folder_module, "delete_folder"))
 
     def test_undo_endpoint_restores_components_from_log_context(self):
         os.environ["APIFOX_TOKEN"] = "token"
@@ -291,12 +243,12 @@ class ProjectConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             logger = log_module.OperationLog(log_dir=tmpdir)
             entry = logger.record(
-                operation="delete",
+                operation="update",
                 resource_type="endpoint",
                 project_id="7575229",
                 target={"path": "/orders", "method": "POST"},
                 before=make_openapi_fixture()["paths"]["/orders"]["post"],
-                after=None,
+                after={"summary": "更新后"},
                 context={
                     "before_components": {
                         "schemas": {
@@ -323,15 +275,6 @@ class ProjectConfigTests(unittest.TestCase):
             self.assertIn("撤销日志", result)
             self.assertIn("components", imported_specs[0])
             self.assertIn("OrderResponse", imported_specs[0]["components"]["schemas"])
-
-    def test_delete_schema_and_folder_tools_exist_with_confirmation(self):
-        os.environ["APIFOX_TOKEN"] = "token"
-        os.environ["APIFOX_PROJECTS"] = '[{"name":"主项目","id":"7575229"}]'
-        schema_module = importlib.import_module("apifox_mcp.tools.schema_tools")
-        folder_module = importlib.import_module("apifox_mcp.tools.folder_tools")
-
-        self.assertIn("安全提示", schema_module.delete_schema("7575229", "LegacyModel"))
-        self.assertIn("安全提示", folder_module.delete_folder("7575229", "历史目录"))
 
     def test_batch_execute_continues_after_failed_item(self):
         os.environ["APIFOX_TOKEN"] = "token"
@@ -385,15 +328,31 @@ class ProjectConfigTests(unittest.TestCase):
         self.assertIn("旧标题", result)
         self.assertIn("20260422_101010_abcd", result)
 
-    def test_batch_execute_dry_run_validates_without_calling_write_tools(self):
+    def test_batch_execute_delete_returns_manual_cleanup_guidance(self):
         os.environ["APIFOX_TOKEN"] = "token"
         os.environ["APIFOX_PROJECTS"] = '[{"name":"主项目","id":"7575229"}]'
         module = importlib.import_module("apifox_mcp.tools.batch_tools")
 
-        def fake_delete(**kwargs):
-            raise AssertionError("dry_run must not call write tools")
+        result = module.batch_execute(
+            project_id="7575229",
+            items=[
+                {
+                    "operation": "delete",
+                    "resource_type": "endpoint",
+                    "path": "/mcp-e2e-20260422/status",
+                    "method": "GET",
+                }
+            ],
+        )
 
-        module.api_tools.delete_api_endpoint = fake_delete
+        self.assertIn("❌ [delete/endpoint]", result)
+        self.assertIn("请在 Apifox 客户端手动删除", result)
+        self.assertIn("汇总: 0 成功, 1 失败", result)
+
+    def test_batch_execute_dry_run_validates_without_calling_write_tools(self):
+        os.environ["APIFOX_TOKEN"] = "token"
+        os.environ["APIFOX_PROJECTS"] = '[{"name":"主项目","id":"7575229"}]'
+        module = importlib.import_module("apifox_mcp.tools.batch_tools")
 
         result = module.batch_execute(
             project_id="7575229",
@@ -405,9 +364,9 @@ class ProjectConfigTests(unittest.TestCase):
         )
 
         self.assertIn("DRY-RUN", result)
-        self.assertIn("参数校验通过", result)
+        self.assertIn("不执行删除", result)
         self.assertIn("缺少必填字段", result)
-        self.assertIn("汇总: 1 可执行, 1 不可执行", result)
+        self.assertIn("汇总: 0 可执行, 2 不可执行", result)
 
     def test_update_api_endpoint_returns_write_review_and_log_id(self):
         os.environ["APIFOX_TOKEN"] = "token"

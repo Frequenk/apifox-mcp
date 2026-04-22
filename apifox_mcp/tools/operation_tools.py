@@ -9,7 +9,6 @@ from typing import Any, Dict
 from ..config import mcp
 from ..operation_log import operation_logger
 from ..utils import _make_request, _resolve_project_id, _validate_config
-from . import api_tools
 
 
 @mcp.tool()
@@ -76,14 +75,9 @@ def _undo_entry(project_id: str, entry: Dict[str, Any]) -> str:
     target = entry.get("target", {})
 
     if resource_type == "endpoint" and operation == "create":
-        return api_tools.delete_api_endpoint(
-            project_id=project_id,
-            path=target.get("path", ""),
-            method=target.get("method", "GET"),
-            confirm=True,
-        )
+        return f"⚠️ 创建操作不能自动撤销。请在 Apifox 客户端手动删除接口: {target.get('method', '').upper()} {target.get('path', '')}"
 
-    if resource_type == "endpoint" and operation in {"update", "patch", "delete"}:
+    if resource_type == "endpoint" and operation in {"update", "patch"}:
         before = entry.get("before")
         if not before:
             raise ValueError("日志缺少 before 快照，无法恢复接口")
@@ -93,27 +87,17 @@ def _undo_entry(project_id: str, entry: Dict[str, Any]) -> str:
         }
         return _import_endpoint_snapshot(project_id, target_with_context, before)
 
-    if resource_type == "schema" and operation in {"update", "delete"}:
+    if resource_type == "schema" and operation == "update":
         before = entry.get("before")
         if not before:
             raise ValueError("日志缺少 before 快照，无法恢复 Schema")
         return _import_schema_snapshot(project_id, target, before)
 
     if resource_type == "schema" and operation == "create":
-        from . import schema_tools
-
-        return schema_tools.delete_schema(project_id=project_id, name=target.get("name", ""), confirm=True)
+        return f"⚠️ 创建操作不能自动撤销。请在 Apifox 客户端手动删除数据模型: {target.get('name', '')}"
 
     if resource_type == "folder" and operation == "create":
-        from . import folder_tools
-
-        return folder_tools.delete_folder(project_id=project_id, folder_name=target.get("folder_name", ""), confirm=True)
-
-    if resource_type == "folder" and operation == "delete":
-        before = entry.get("before")
-        if not before:
-            raise ValueError("日志缺少 before 快照，无法恢复目录")
-        return _import_folder_snapshot(project_id, before)
+        return f"⚠️ 创建操作不能自动撤销。请在 Apifox 客户端手动删除目录/标签: {target.get('folder_name', '')}"
 
     raise ValueError(f"不支持撤销 {operation}/{resource_type}")
 
@@ -147,19 +131,6 @@ def _import_schema_snapshot(project_id: str, target: Dict[str, Any], schema_snap
     if not result["success"]:
         raise RuntimeError(result.get("error", "未知错误"))
     return f"✅ 已撤销 Schema 操作: {name}"
-
-
-def _import_folder_snapshot(project_id: str, folder_snapshot: Dict[str, Any]) -> str:
-    spec = {
-        "openapi": "3.0.0",
-        "info": {"title": "Undo Operation", "version": "1.0.0"},
-        "paths": {},
-        "tags": [folder_snapshot],
-    }
-    result = _import_spec(project_id, spec)
-    if not result["success"]:
-        raise RuntimeError(result.get("error", "未知错误"))
-    return f"✅ 已撤销目录操作: {folder_snapshot.get('name', '')}"
 
 
 def _import_spec(project_id: str, spec: Dict[str, Any]) -> Dict[str, Any]:
