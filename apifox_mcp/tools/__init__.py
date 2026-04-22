@@ -10,6 +10,8 @@ from . import config_tools
 from . import api_tools
 from . import schema_tools
 from . import folder_tools
+from . import batch_tools
+from . import operation_tools
 from . import tag_tools
 from . import audit_tools
 from . import crud_tools
@@ -20,6 +22,8 @@ __all__ = [
     "api_tools", 
     "schema_tools",
     "folder_tools",
+    "batch_tools",
+    "operation_tools",
     "tag_tools",
     "audit_tools",
     "crud_tools",

@@ -7,98 +7,147 @@ API 接口管理工具
 ⚠️ 强制规范：
 1. 所有接口必须有中文描述
 2. 所有 Schema 字段必须有 description 说明
-3. 必须提供成功响应 (2xx) 和错误响应 (4xx/5xx)
+3. 必须提供成功响应 (2xx)；错误响应只在调用方明确传入时写入
 4. 【重要】所有 Schema 必须定义为公共组件（components/schemas），
    禁止内联定义！本模块会自动将传入的 schema 提取为公共组件并使用 $ref 引用。
 """
 
+import copy
 import json
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Tuple, Any
 
 from ..config import (
     mcp, logger, HTTP_METHODS,
     HTTP_STATUS_CODES, API_STATUS
 )
+from ..operation_log import _snapshot_endpoint, operation_logger
 from ..utils import _validate_config, _make_request, _build_openapi_spec, _resolve_project_id
 
 
-# ============================================================
-# 标准错误响应模板 - 完整的 4xx/5xx 响应
-# ============================================================
-
-STANDARD_ERROR_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "code": {"type": "integer", "description": "错误码"},
-        "message": {"type": "string", "description": "错误信息"},
-        "details": {"type": "object", "description": "详细信息"}
-    },
-    "required": ["code", "message"]
-}
-
-STANDARD_ERROR_RESPONSES = {
-    # 4xx 客户端错误
-    400: {
-        "code": 400,
-        "name": "请求参数错误",
-        "schema": STANDARD_ERROR_SCHEMA,
-        "example": {"code": 400, "message": "请求参数错误", "details": {"field": "name", "reason": "不能为空"}}
-    },
-    401: {
-        "code": 401,
-        "name": "未授权",
-        "schema": STANDARD_ERROR_SCHEMA,
-        "example": {"code": 401, "message": "未授权，请先登录"}
-    },
-    403: {
-        "code": 403,
-        "name": "禁止访问",
-        "schema": STANDARD_ERROR_SCHEMA,
-        "example": {"code": 403, "message": "无权限访问此资源"}
-    },
-    404: {
-        "code": 404,
-        "name": "资源不存在",
-        "schema": STANDARD_ERROR_SCHEMA,
-        "example": {"code": 404, "message": "请求的资源不存在"}
-    },
-    409: {
-        "code": 409,
-        "name": "资源冲突",
-        "schema": STANDARD_ERROR_SCHEMA,
-        "example": {"code": 409, "message": "资源已存在或状态冲突"}
-    },
-    422: {
-        "code": 422,
-        "name": "实体无法处理",
-        "schema": STANDARD_ERROR_SCHEMA,
-        "example": {"code": 422, "message": "请求格式正确但语义错误", "details": {"field": "email", "reason": "格式不正确"}}
-    },
-    # 5xx 服务端错误
-    500: {
-        "code": 500,
-        "name": "服务器内部错误",
-        "schema": STANDARD_ERROR_SCHEMA,
-        "example": {"code": 500, "message": "服务器内部错误，请稍后重试"}
-    },
-    502: {
-        "code": 502,
-        "name": "网关错误",
-        "schema": STANDARD_ERROR_SCHEMA,
-        "example": {"code": 502, "message": "网关错误，上游服务不可用"}
-    },
-    503: {
-        "code": 503,
-        "name": "服务不可用",
-        "schema": STANDARD_ERROR_SCHEMA,
-        "example": {"code": 503, "message": "服务暂时不可用，请稍后重试"}
+def _export_openapi(project_id: str) -> Dict[str, Any]:
+    """导出完整 OpenAPI 文档。"""
+    export_payload = {
+        "scope": {"type": "ALL"},
+        "options": {"includeApifoxExtensionProperties": True, "addFoldersToTags": False},
+        "oasVersion": "3.1",
+        "exportFormat": "JSON"
     }
-}
+    result = _make_request("POST", f"/projects/{project_id}/export-openapi?locale=zh-CN", data=export_payload)
+    if not result["success"]:
+        raise RuntimeError(result.get("error", "未知错误"))
+    return result.get("data", {})
 
-# 所有 API 必需的错误响应码
-REQUIRED_4XX_CODES = [400, 401, 403, 404]  # 所有 API 都需要
-REQUIRED_5XX_CODES = [500, 502, 503]  # 所有 API 都需要
-OPTIONAL_4XX_CODES = [409, 422]  # POST/PUT/PATCH 可能需要
+
+def _get_operation(openapi_data: Dict[str, Any], path: str, method: str) -> Tuple[Dict[str, Any], str]:
+    """从 OpenAPI 文档中获取指定 operation。"""
+    method_lower = method.lower()
+    paths = openapi_data.get("paths", {})
+    if path not in paths:
+        raise KeyError(f"未找到路径为 {path} 的接口")
+    if method_lower not in paths[path]:
+        raise KeyError(f"未找到 {method.upper()} {path} 接口")
+    return paths[path][method_lower], method_lower
+
+
+def _endpoint_log_context(openapi_data: Dict[str, Any]) -> Dict[str, Any]:
+    components = copy.deepcopy(openapi_data.get("components", {}))
+    return {"before_components": components} if components else {}
+
+
+def _operation_snapshot(operation: Dict[str, Any]) -> Dict[str, Any]:
+    """生成用于对比的 operation 快照。"""
+    request_json = operation.get("requestBody", {}).get("content", {}).get("application/json", {})
+    responses = operation.get("responses", {})
+    return {
+        "summary": operation.get("summary", ""),
+        "description": operation.get("description", ""),
+        "tags": operation.get("tags", []),
+        "parameters": operation.get("parameters", []),
+        "request_body": operation.get("requestBody"),
+        "request_example": request_json.get("example"),
+        "responses": responses,
+        "response_codes": sorted(responses.keys()),
+    }
+
+
+def _build_single_operation_spec(openapi_data: Dict[str, Any], path: str, method_lower: str, operation: Dict[str, Any]) -> Dict[str, Any]:
+    """构建只包含目标 operation 但保留全量 components 的导入文档。"""
+    spec = {
+        "openapi": "3.0.0",
+        "info": openapi_data.get("info", {"title": "Apifox API", "version": "1.0.0"}),
+        "paths": {path: {method_lower: operation}},
+    }
+    if openapi_data.get("components"):
+        spec["components"] = openapi_data["components"]
+    if openapi_data.get("tags"):
+        spec["tags"] = openapi_data["tags"]
+    return spec
+
+
+def _summarize_snapshot_diff(before: Dict[str, Any], after: Dict[str, Any]) -> List[str]:
+    """输出更新前后的关键差异和潜在风险。"""
+    lines = []
+    for key, label in [
+        ("summary", "名称"),
+        ("description", "描述"),
+        ("tags", "标签"),
+        ("response_codes", "响应码"),
+    ]:
+        if before.get(key) != after.get(key):
+            lines.append(f"   • {label}: {before.get(key)!r} -> {after.get(key)!r}")
+
+    before_params = before.get("parameters") or []
+    after_params = after.get("parameters") or []
+    if len(after_params) < len(before_params):
+        lines.append(f"   ⚠️ 参数数量减少: {len(before_params)} -> {len(after_params)}")
+    elif len(after_params) != len(before_params):
+        lines.append(f"   • 参数数量: {len(before_params)} -> {len(after_params)}")
+
+    if before.get("request_body") and not after.get("request_body"):
+        lines.append("   ⚠️ 请求体被移除")
+    if before.get("request_example") and not after.get("request_example"):
+        lines.append("   ⚠️ 请求示例被移除")
+
+    before_responses = before.get("responses") or {}
+    after_responses = after.get("responses") or {}
+    if len(after_responses) < len(before_responses):
+        lines.append(f"   ⚠️ 响应数量减少: {len(before_responses)} -> {len(after_responses)}")
+
+    return lines or ["   • 无关键差异"]
+
+
+def _detect_unexpected_loss(before: Dict[str, Any], after: Dict[str, Any]) -> List[str]:
+    """检测 patch 写入后不应出现的信息丢失。"""
+    losses = []
+    if len(after.get("parameters") or []) < len(before.get("parameters") or []):
+        losses.append("参数数量减少")
+    if before.get("request_body") and not after.get("request_body"):
+        losses.append("请求体消失")
+    if before.get("request_example") and not after.get("request_example"):
+        losses.append("请求示例消失")
+    if len(after.get("responses") or {}) < len(before.get("responses") or {}):
+        losses.append("响应数量减少")
+    return losses
+
+
+def _format_json(data: Dict[str, Any]) -> str:
+    return json.dumps(data, ensure_ascii=False, indent=2)
+
+
+def _compact_spec_preview(openapi_spec: Dict[str, Any], path: str, method: str, changed_fields: Optional[List[str]] = None) -> str:
+    operation = openapi_spec.get("paths", {}).get(path, {}).get(method.lower(), {})
+    schemas = openapi_spec.get("components", {}).get("schemas", {})
+    response_codes = sorted((operation.get("responses") or {}).keys())
+    lines = [
+        f"   • 目标: {method.upper()} {path}",
+        f"   • 名称: {operation.get('summary', '')}",
+        f"   • 字段: {', '.join(changed_fields or []) or '完整接口定义'}",
+        f"   • 参数数量: {len(operation.get('parameters', []))}",
+        f"   • 响应码: {', '.join(response_codes) or '无'}",
+        f"   • components/schemas 数量: {len(schemas)}",
+        "   • OpenAPI 明细已省略，避免占用过多上下文",
+    ]
+    return "\n".join(lines)
 
 
 def _validate_schema_has_descriptions(schema: Dict, path: str = "") -> List[str]:
@@ -124,26 +173,9 @@ def _validate_schema_has_descriptions(schema: Dict, path: str = "") -> List[str]
     return missing
 
 
-def _auto_fill_error_responses(responses: Optional[List[Dict]], method: str) -> List[Dict]:
-    """自动补充所有标准错误响应 (4xx + 5xx)"""
-    if responses is None:
-        responses = []
-    
-    existing_codes = {r.get("code") for r in responses}
-    
-    # 所有 API 必需的错误响应
-    required_codes = REQUIRED_4XX_CODES + REQUIRED_5XX_CODES
-    
-    # POST/PUT/PATCH 额外需要 409, 422
-    if method in ["POST", "PUT", "PATCH"]:
-        required_codes = required_codes + OPTIONAL_4XX_CODES
-    
-    # 添加缺失的错误响应
-    for code in required_codes:
-        if code not in existing_codes and code in STANDARD_ERROR_RESPONSES:
-            responses.append(STANDARD_ERROR_RESPONSES[code].copy())
-    
-    return responses
+def _normalize_explicit_responses(responses: Optional[List[Dict]]) -> List[Dict]:
+    """仅保留调用方显式传入的响应定义，不做自动补齐。"""
+    return list(responses or [])
 
 
 @mcp.tool()
@@ -243,6 +275,314 @@ def list_api_endpoints(
 
 
 @mcp.tool()
+def get_api_endpoint_snapshot(project_id: str, path: str, method: str) -> str:
+    """
+    获取接口的完整结构化快照，包含参数、请求体、响应、示例和组件引用。
+
+    用途：
+    - 修改旧接口前先读取完整上下文
+    - 判断局部更新是否会影响参数、请求体或响应定义
+    - 需要完整 OpenAPI operation 时优先使用本工具，而不是 get_api_endpoint_detail
+    """
+    config_error = _validate_config(project_id)
+    if config_error:
+        return config_error
+    resolved_project_id = _resolve_project_id(project_id)
+
+    try:
+        openapi_data = _export_openapi(resolved_project_id)
+        operation, _ = _get_operation(openapi_data, path, method)
+    except (RuntimeError, KeyError) as exc:
+        return f"❌ 获取失败: {exc}"
+
+    snapshot = _operation_snapshot(operation)
+    snapshot["path"] = path
+    snapshot["method"] = method.upper()
+    snapshot["components"] = openapi_data.get("components", {})
+    return _format_json(snapshot)
+
+
+@mcp.tool()
+def patch_api_endpoint_metadata(
+    project_id: str,
+    path: str,
+    method: str,
+    title: Optional[str] = None,
+    description: Optional[str] = None,
+    tags: Optional[List[str]] = None,
+    dry_run: bool = False
+) -> str:
+    """
+    安全地局部更新接口元信息，只修改名称、描述和标签。
+
+    本工具会先导出完整接口定义，只替换指定字段，并保留原有参数、请求体、响应、示例和 components。
+    修改旧接口的名称、介绍、标签时应优先使用本工具，不要使用 update_api_endpoint。
+    """
+    config_error = _validate_config(project_id)
+    if config_error:
+        return config_error
+    resolved_project_id = _resolve_project_id(project_id)
+
+    if title is None and description is None and tags is None:
+        return "⚠️ 未提供任何要修改的字段，请至少提供 title、description 或 tags"
+
+    try:
+        openapi_data = _export_openapi(resolved_project_id)
+        operation, method_lower = _get_operation(openapi_data, path, method)
+    except (RuntimeError, KeyError) as exc:
+        return f"❌ 获取失败: {exc}"
+
+    updated_operation = copy.deepcopy(operation)
+    before = _operation_snapshot(operation)
+
+    if title is not None:
+        updated_operation["summary"] = title
+    if description is not None:
+        updated_operation["description"] = description
+    if tags is not None:
+        updated_operation["tags"] = tags
+
+    after = _operation_snapshot(updated_operation)
+    diff_lines = _summarize_snapshot_diff(before, after)
+    openapi_spec = _build_single_operation_spec(openapi_data, path, method_lower, updated_operation)
+
+    if dry_run:
+        changed_fields = []
+        if title is not None:
+            changed_fields.append("summary")
+        if description is not None:
+            changed_fields.append("description")
+        if tags is not None:
+            changed_fields.append("tags")
+        return (
+            "🔎 DRY-RUN: 接口元信息将按以下方式更新，不会写入 Apifox\n\n"
+            "变更摘要:\n" + "\n".join(diff_lines) +
+            "\n\n紧凑预览:\n" + _compact_spec_preview(openapi_spec, path, method, changed_fields)
+        )
+
+    import_payload = {
+        "input": json.dumps(openapi_spec),
+        "options": {
+            "targetEndpointFolderId": 0,
+            "targetSchemaFolderId": 0,
+            "endpointOverwriteBehavior": "OVERWRITE_EXISTING",
+            "schemaOverwriteBehavior": "OVERWRITE_EXISTING"
+        }
+    }
+
+    result = _make_request("POST", f"/projects/{resolved_project_id}/import-openapi?locale=zh-CN", data=import_payload)
+    if not result["success"]:
+        operation_logger.record(
+            operation="patch",
+            resource_type="endpoint",
+            project_id=resolved_project_id,
+            target={"path": path, "method": method.upper()},
+            before=operation,
+            after=None,
+            status="failed",
+            error=result.get("error", "未知错误"),
+            context=_endpoint_log_context(openapi_data),
+        )
+        return f"❌ 更新失败: {result.get('error', '未知错误')}"
+
+    try:
+        after_openapi_data = _export_openapi(resolved_project_id)
+        after_operation, _ = _get_operation(after_openapi_data, path, method)
+        post_write = _operation_snapshot(after_operation)
+        post_diff_lines = _summarize_snapshot_diff(before, post_write)
+        losses = _detect_unexpected_loss(before, post_write)
+    except (RuntimeError, KeyError) as exc:
+        operation_logger.record(
+            operation="patch",
+            resource_type="endpoint",
+            project_id=resolved_project_id,
+            target={"path": path, "method": method.upper()},
+            before=operation,
+            after=updated_operation,
+            status="failed",
+            error=f"写后复核失败: {exc}",
+            context=_endpoint_log_context(openapi_data),
+        )
+        return "⚠️ 接口元信息已写入，但写后复核失败: " + str(exc)
+
+    log_entry = operation_logger.record(
+        operation="patch",
+        resource_type="endpoint",
+        project_id=resolved_project_id,
+        target={"path": path, "method": method.upper()},
+        before=operation,
+        after=after_operation,
+        context=_endpoint_log_context(openapi_data),
+    )
+
+    output = ["✅ 接口元信息更新成功", "", "写后复核:", *post_diff_lines]
+    if losses:
+        output.append("")
+        output.append("⚠️ 检测到非预期信息丢失: " + ", ".join(losses))
+    output.append("")
+    output.append(f"操作日志: {log_entry['id']}")
+    return "\n".join(output)
+
+
+@mcp.tool()
+def batch_get_api_endpoint_summaries(
+    project_id: str,
+    items: List[Dict[str, str]]
+) -> str:
+    """
+    批量获取接口轻量摘要，适合只需要名称、描述、标签、参数数量和响应码的场景。
+
+    items 格式: [{"path": "/orders", "method": "POST"}]
+    本工具不会返回完整 schema/components，避免占用过多上下文。
+    """
+    config_error = _validate_config(project_id)
+    if config_error:
+        return config_error
+    resolved_project_id = _resolve_project_id(project_id)
+
+    try:
+        openapi_data = _export_openapi(resolved_project_id)
+    except RuntimeError as exc:
+        return f"❌ 获取失败: {exc}"
+
+    output = [f"📋 接口轻量摘要 (共 {len(items)} 个)", "=" * 60]
+    for item in items:
+        path = item.get("path", "")
+        method = item.get("method", "GET")
+        try:
+            operation, _ = _get_operation(openapi_data, path, method)
+            responses = operation.get("responses", {})
+            output.append(f"[{method.upper():6}] {path}")
+            output.append(f"   名称: {operation.get('summary', '未命名')}")
+            output.append(f"   描述: {operation.get('description', '')[:120]}")
+            output.append(f"   标签: {', '.join(operation.get('tags', [])) or '无'}")
+            output.append(f"   参数: {len(operation.get('parameters', []))}")
+            output.append(f"   响应码: {', '.join(sorted(responses.keys())) or '无'}")
+        except KeyError as exc:
+            output.append(f"[{method.upper():6}] {path}")
+            output.append(f"   ❌ {exc}")
+    return "\n".join(output)
+
+
+@mcp.tool()
+def batch_patch_api_endpoint_titles(
+    project_id: str,
+    items: List[Dict[str, str]],
+    dry_run: bool = False
+) -> str:
+    """
+    批量安全修改接口名称，只更新 summary，保留原参数、请求体、响应、示例和 components。
+
+    items 格式: [{"path": "/orders", "method": "POST", "title": "新名称"}]
+    """
+    config_error = _validate_config(project_id)
+    if config_error:
+        return config_error
+    resolved_project_id = _resolve_project_id(project_id)
+
+    if not items:
+        return "⚠️ items 不能为空"
+
+    try:
+        openapi_data = _export_openapi(resolved_project_id)
+    except RuntimeError as exc:
+        return f"❌ 获取失败: {exc}"
+
+    outputs = [f"📋 批量接口名称更新 (共 {len(items)} 个)", "=" * 60]
+    planned_specs = []
+
+    for item in items:
+        path = item.get("path", "")
+        method = item.get("method", "GET")
+        title = item.get("title", "")
+        if not path or not method or not title:
+            outputs.append(f"❌ 参数不完整: {item}")
+            continue
+        try:
+            operation, method_lower = _get_operation(openapi_data, path, method)
+        except KeyError as exc:
+            outputs.append(f"❌ {method.upper()} {path}: {exc}")
+            continue
+
+        updated_operation = copy.deepcopy(operation)
+        before = _operation_snapshot(operation)
+        updated_operation["summary"] = title
+        after = _operation_snapshot(updated_operation)
+        diff_lines = _summarize_snapshot_diff(before, after)
+        spec = _build_single_operation_spec(openapi_data, path, method_lower, updated_operation)
+        planned_specs.append((path, method, before, spec))
+        outputs.append(f"[{method.upper():6}] {path}")
+        outputs.extend(diff_lines)
+
+    if dry_run:
+        outputs.append("")
+        outputs.append("🔎 DRY-RUN: 不会写入 Apifox")
+        return "\n".join(outputs)
+
+    for path, method, before, spec in planned_specs:
+        import_payload = {
+            "input": json.dumps(spec),
+            "options": {
+                "targetEndpointFolderId": 0,
+                "targetSchemaFolderId": 0,
+                "endpointOverwriteBehavior": "OVERWRITE_EXISTING",
+                "schemaOverwriteBehavior": "OVERWRITE_EXISTING"
+            }
+        }
+        result = _make_request("POST", f"/projects/{resolved_project_id}/import-openapi?locale=zh-CN", data=import_payload)
+        if not result["success"]:
+            operation_logger.record(
+                operation="patch",
+                resource_type="endpoint",
+                project_id=resolved_project_id,
+                target={"path": path, "method": method.upper()},
+                before=before,
+                after=None,
+                status="failed",
+                error=result.get("error", "未知错误"),
+                context=_endpoint_log_context(openapi_data),
+            )
+            outputs.append(f"❌ {method.upper()} {path}: 更新失败: {result.get('error', '未知错误')}")
+            continue
+
+        try:
+            after_openapi_data = _export_openapi(resolved_project_id)
+            after_operation, _ = _get_operation(after_openapi_data, path, method)
+            post_write = _operation_snapshot(after_operation)
+            losses = _detect_unexpected_loss(before, post_write)
+            log_entry = operation_logger.record(
+                operation="patch",
+                resource_type="endpoint",
+                project_id=resolved_project_id,
+                target={"path": path, "method": method.upper()},
+                before=before,
+                after=after_operation,
+                context=_endpoint_log_context(openapi_data),
+            )
+            outputs.append(f"✅ {method.upper()} {path}: 写后复核完成")
+            outputs.append(f"   操作日志: {log_entry['id']}")
+            if losses:
+                outputs.append(f"⚠️ {method.upper()} {path}: 非预期信息丢失: {', '.join(losses)}")
+        except (RuntimeError, KeyError) as exc:
+            operation_logger.record(
+                operation="patch",
+                resource_type="endpoint",
+                project_id=resolved_project_id,
+                target={"path": path, "method": method.upper()},
+                before=before,
+                after=spec["paths"][path][method.lower()],
+                status="failed",
+                error=f"写后复核失败: {exc}",
+                context=_endpoint_log_context(openapi_data),
+            )
+            outputs.append(f"⚠️ {method.upper()} {path}: 写后复核失败: {exc}")
+
+    outputs.append("")
+    outputs.append("✅ 批量更新完成")
+    return "\n".join(outputs)
+
+
+@mcp.tool()
 def create_api_endpoint(
     project_id: str,
     title: str, 
@@ -272,7 +612,7 @@ def create_api_endpoint(
     4. response_example: 成功响应的示例数据
     5. POST/PUT/PATCH 必须提供 request_body_schema 和 request_body_example
     
-    ⚠️ 系统会自动添加标准错误响应（400/404/500），无需手动定义。
+    ⚠️ 错误响应不会自动补齐；如需 400/401/500 等响应，请通过 responses 显式传入。
     
     Args:
         project_id: 【必填】目标 Apifox 项目 ID，必须来自 check_apifox_config 输出的项目列表
@@ -335,8 +675,7 @@ def create_api_endpoint(
                               ⚠️ 必须是真实数据，如: {"name": "张三", "email": "zhangsan@example.com"}
                               ❌ 错误: {"name": "string", "age": 0}
         
-        responses: (可选) 自定义响应列表，用于覆盖默认错误响应
-                   系统会自动添加 400/401/403/404/409/422/500/502/503 错误响应
+        responses: (可选) 显式响应列表。不会自动补齐任何错误响应。
     
     Returns:
         创建结果信息
@@ -490,8 +829,8 @@ def create_api_endpoint(
     if errors:
         return "🚫 接口定义不完整，请修正以下问题：\n\n" + "\n".join(errors)
     
-    # 自动补充错误响应
-    final_responses = _auto_fill_error_responses(responses, method_upper)
+    # 只保留显式传入的额外响应，不自动补齐错误响应
+    final_responses = _normalize_explicit_responses(responses)
     
     # 添加成功响应
     success_response = {
@@ -528,7 +867,7 @@ def create_api_endpoint(
             "targetEndpointFolderId": folder_id,
             "targetSchemaFolderId": 0,
             "endpointOverwriteBehavior": "CREATE_NEW",  # 接口不覆盖，避免意外修改
-            # Schema 使用覆盖策略，避免重复创建相同的 Schema（如 ErrorResponse）,
+            # Schema 使用覆盖策略，避免重复创建相同的 Schema
             "schemaOverwriteBehavior": "OVERWRITE_EXISTING"
         }
     }
@@ -541,6 +880,16 @@ def create_api_endpoint(
     )
     
     if not result["success"]:
+        operation_logger.record(
+            operation="create",
+            resource_type="endpoint",
+            project_id=resolved_project_id,
+            target={"path": path, "method": method_upper},
+            before=None,
+            after=openapi_spec["paths"][path][method_upper.lower()],
+            status="failed",
+            error=result.get("error", "未知错误"),
+        )
         return f"❌ 创建失败: {result.get('error', '未知错误')}"
     
     counters = result.get("data", {}).get("data", {}).get("counters", {})
@@ -552,6 +901,15 @@ def create_api_endpoint(
     
     response_codes = [r.get("code") for r in final_responses]
     action = "创建" if created > 0 else "更新"
+
+    log_entry = operation_logger.record(
+        operation="create",
+        resource_type="endpoint",
+        project_id=resolved_project_id,
+        target={"path": path, "method": method_upper},
+        before=None,
+        after=openapi_spec["paths"][path][method_upper.lower()],
+    )
     
     return f"""✅ 接口{action}成功!
 
@@ -561,8 +919,9 @@ def create_api_endpoint(
    • 描述: {description[:50]}{'...' if len(description) > 50 else ''}
    • 标签: {', '.join(tags) if tags else '无'}
    • 响应码: {', '.join(map(str, sorted(response_codes)))}
+   • 操作日志: {log_entry['id']}
    
-💡 系统已自动添加标准错误响应 (400/404/500)"""
+💡 错误响应未自动补齐；如需错误响应，请在 responses 中显式传入。"""
 
 
 @mcp.tool()
@@ -584,10 +943,16 @@ def update_api_endpoint(
     request_body_schema: Optional[Dict] = None,
     request_body_example: Optional[Dict] = None,
     responses: Optional[List[Dict]] = None,
-    folder_id: int = 0
+    folder_id: int = 0,
+    confirm_replace: bool = False,
+    dry_run: bool = False
 ) -> str:
     """
-    更新 Apifox 项目中的现有 HTTP 接口。
+    全量替换 Apifox 项目中的现有 HTTP 接口。
+
+    ⚠️ 危险：这是全量覆盖操作，未传入的参数、请求体、响应和示例可能会丢失。
+    修改接口名称、描述或标签时，请优先使用 patch_api_endpoint_metadata。
+    只有需要重建完整接口定义时才使用本工具，并设置 confirm_replace=True。
     
     ⚠️ 强制要求 - 同 create_api_endpoint，以下内容必须提供：
     1. title: 中文业务名称
@@ -606,6 +971,8 @@ def update_api_endpoint(
         response_example: 【必填】成功响应示例
         new_path: 新路径（如需修改）
         new_method: 新 HTTP 方法（如需修改）
+        confirm_replace: 是否确认执行全量覆盖，默认 False
+        dry_run: 只生成即将导入的 OpenAPI，不写入 Apifox
         其他参数同 create_api_endpoint
         
     Returns:
@@ -615,6 +982,17 @@ def update_api_endpoint(
     if config_error:
         return config_error
     resolved_project_id = _resolve_project_id(project_id)
+
+    if not confirm_replace:
+        return """⚠️ 已阻止全量覆盖操作。
+
+update_api_endpoint 会全量覆盖接口定义，未传入的参数、请求体、响应和示例可能会丢失。
+
+常见安全修改请使用:
+   • patch_api_endpoint_metadata: 修改名称、描述、标签
+   • get_api_endpoint_snapshot: 更新前读取完整接口快照
+
+如果你确认要全量覆盖，请重新调用并设置 confirm_replace=True。"""
     
     method_upper = method.upper()
     if method_upper not in HTTP_METHODS:
@@ -666,8 +1044,8 @@ def update_api_endpoint(
     if errors:
         return "🚫 接口定义不完整：\n\n" + "\n".join(errors)
     
-    # 自动补充错误响应
-    final_responses = _auto_fill_error_responses(responses, final_method)
+    # 只保留显式传入的额外响应，不自动补齐错误响应
+    final_responses = _normalize_explicit_responses(responses)
     success_response = {"code": 200, "name": "成功", "schema": response_schema, "example": response_example}
     final_responses = [r for r in final_responses if r.get("code") != 200]
     final_responses.insert(0, success_response)
@@ -688,6 +1066,9 @@ def update_api_endpoint(
         response_schema=None,
         response_example=None
     )
+
+    if dry_run:
+        return "🔎 DRY-RUN: 将执行全量覆盖，不会写入 Apifox\n\n紧凑预览:\n" + _compact_spec_preview(openapi_spec, final_path, final_method)
     
     import_payload = {
         "input": json.dumps(openapi_spec),
@@ -700,37 +1081,205 @@ def update_api_endpoint(
     }
     
     logger.info(f"正在更新接口: {final_method} {final_path}")
+    before_operation = None
+    before_context = {}
+    try:
+        before_openapi_data = _export_openapi(resolved_project_id)
+        before_operation = _snapshot_endpoint(before_openapi_data, path, method_upper)
+        before_context = _endpoint_log_context(before_openapi_data)
+    except (RuntimeError, KeyError):
+        before_operation = None
+
     result = _make_request("POST", f"/projects/{resolved_project_id}/import-openapi?locale=zh-CN", data=import_payload)
     
     if not result["success"]:
+        operation_logger.record(
+            operation="update",
+            resource_type="endpoint",
+            project_id=resolved_project_id,
+            target={"path": path, "method": method_upper},
+            before=before_operation,
+            after=openapi_spec["paths"][final_path][final_method.lower()],
+            status="failed",
+            error=result.get("error", "未知错误"),
+            context=before_context,
+        )
         return f"❌ 更新失败: {result.get('error', '未知错误')}"
     
+    try:
+        after_openapi_data = _export_openapi(resolved_project_id)
+        after_operation, _ = _get_operation(after_openapi_data, final_path, final_method)
+        before_snapshot = _operation_snapshot(before_operation) if before_operation else {}
+        after_snapshot = _operation_snapshot(after_operation)
+        review_lines = _summarize_snapshot_diff(before_snapshot, after_snapshot) if before_snapshot else ["   • 写入后接口存在，无法生成 before 对比"]
+        losses = _detect_unexpected_loss(before_snapshot, after_snapshot) if before_snapshot else []
+    except (RuntimeError, KeyError) as exc:
+        log_entry = operation_logger.record(
+            operation="update",
+            resource_type="endpoint",
+            project_id=resolved_project_id,
+            target={"path": path, "method": method_upper},
+            before=before_operation,
+            after=openapi_spec["paths"][final_path][final_method.lower()],
+            status="failed",
+            error=f"写后复核失败: {exc}",
+            context=before_context,
+        )
+        return f"⚠️ 接口已写入，但写后复核失败: {exc}\n\n操作日志: {log_entry['id']}"
+
     counters = result.get("data", {}).get("data", {}).get("counters", {})
     updated = counters.get("endpointUpdated", 0)
     action = "更新" if updated > 0 else "创建"
-    
-    return f"""✅ 接口{action}成功!
 
-📋 接口信息:
-   • 名称: {title}
-   • 路径: {final_method} {final_path}
-   • 描述: {description[:50]}{'...' if len(description) > 50 else ''}"""
+    log_entry = operation_logger.record(
+        operation="update",
+        resource_type="endpoint",
+        project_id=resolved_project_id,
+        target={"path": path, "method": method_upper},
+        before=before_operation,
+        after=after_operation,
+        context=before_context,
+    )
+
+    output = [
+        f"✅ 接口{action}成功!",
+        "",
+        "📋 接口信息:",
+        f"   • 名称: {title}",
+        f"   • 路径: {final_method} {final_path}",
+        f"   • 描述: {description[:50]}{'...' if len(description) > 50 else ''}",
+        "",
+        "写后复核:",
+        *review_lines,
+    ]
+    if losses:
+        output.append("")
+        output.append("⚠️ 检测到非预期信息丢失: " + ", ".join(losses))
+    output.append("")
+    output.append(f"操作日志: {log_entry['id']}")
+    
+    return "\n".join(output)
 
 
 @mcp.tool()
 def delete_api_endpoint(project_id: str, path: str, method: str, confirm: bool = False) -> str:
-    """删除 Apifox 项目中的 HTTP 接口。⚠️ 此操作不可撤销！"""
+    """删除 Apifox 项目中的 HTTP 接口，并记录操作日志。"""
     config_error = _validate_config(project_id)
     if config_error:
         return config_error
     resolved_project_id = _resolve_project_id(project_id)
-    
+
     method_upper = method.upper()
-    
+    method_lower = method.lower()
+    if method_upper not in HTTP_METHODS:
+        return f"❌ 错误: 无效的 HTTP 方法 '{method}'"
+
     if not confirm:
         return f"⚠️ 安全提示: 删除操作不可撤销!\n\n请确认要删除接口: {method_upper} {path}\n\n如确认删除，请设置 confirm=True"
-    
-    return f"⚠️ 公开 API 暂不支持直接删除接口\n\n请在 Apifox 客户端中手动删除: {method_upper} {path}\n项目 ID: {resolved_project_id}"
+
+    try:
+        openapi_data = _export_openapi(resolved_project_id)
+        before = _snapshot_endpoint(openapi_data, path, method_upper)
+    except (RuntimeError, KeyError) as exc:
+        return f"❌ 删除失败: {exc}"
+
+    delete_spec = copy.deepcopy(openapi_data)
+    delete_spec.setdefault("paths", {})
+    delete_spec["paths"].setdefault(path, {})
+    delete_spec["paths"][path].pop(method_lower, None)
+
+    import_spec = {
+        "openapi": "3.0.0",
+        "info": delete_spec.get("info", {"title": "Apifox API", "version": "1.0.0"}),
+        "paths": delete_spec.get("paths", {}),
+    }
+    if delete_spec.get("components"):
+        import_spec["components"] = delete_spec["components"]
+    if delete_spec.get("tags"):
+        import_spec["tags"] = delete_spec["tags"]
+
+    import_payload = {
+        "input": json.dumps(import_spec),
+        "options": {
+            "targetEndpointFolderId": 0,
+            "targetSchemaFolderId": 0,
+            "endpointOverwriteBehavior": "OVERWRITE_EXISTING",
+            "schemaOverwriteBehavior": "OVERWRITE_EXISTING"
+        }
+    }
+    result = _make_request("POST", f"/projects/{resolved_project_id}/import-openapi?locale=zh-CN", data=import_payload)
+    if not result["success"]:
+        operation_logger.record(
+            operation="delete",
+            resource_type="endpoint",
+            project_id=resolved_project_id,
+            target={"path": path, "method": method_upper},
+            before=before,
+            after=None,
+            status="failed",
+            error=result.get("error", "未知错误"),
+            context=_endpoint_log_context(openapi_data),
+        )
+        return f"❌ 删除失败: {result.get('error', '未知错误')}"
+
+    try:
+        after_openapi_data = _export_openapi(resolved_project_id)
+        _snapshot_endpoint(after_openapi_data, path, method_upper)
+        verify_error = "删除后复核失败: 目标仍存在"
+        log_entry = operation_logger.record(
+            operation="delete",
+            resource_type="endpoint",
+            project_id=resolved_project_id,
+            target={"path": path, "method": method_upper},
+            before=before,
+            after=None,
+            status="failed",
+            error=verify_error,
+            context=_endpoint_log_context(openapi_data),
+        )
+        return f"""⚠️ 接口删除请求已提交，但未实际删除
+
+📋 接口信息:
+   • 路径: {method_upper} {path}
+   • 操作日志: {log_entry['id']}
+
+写后复核:
+   • {verify_error}
+
+请在 Apifox 客户端中手动删除，或检查 Apifox OpenAPI 导入覆盖策略。"""
+    except KeyError:
+        pass
+    except RuntimeError as exc:
+        log_entry = operation_logger.record(
+            operation="delete",
+            resource_type="endpoint",
+            project_id=resolved_project_id,
+            target={"path": path, "method": method_upper},
+            before=before,
+            after=None,
+            status="failed",
+            error=f"删除后复核失败: {exc}",
+            context=_endpoint_log_context(openapi_data),
+        )
+        return f"⚠️ 接口删除请求已提交，但写后复核失败: {exc}\n\n操作日志: {log_entry['id']}"
+
+    log_entry = operation_logger.record(
+        operation="delete",
+        resource_type="endpoint",
+        project_id=resolved_project_id,
+        target={"path": path, "method": method_upper},
+        before=before,
+        after=None,
+        context=_endpoint_log_context(openapi_data),
+    )
+
+    return f"""✅ 接口删除请求已提交
+
+📋 接口信息:
+   • 路径: {method_upper} {path}
+   • 操作日志: {log_entry['id']}
+
+⚠️ 已通过 OpenAPI 导入尝试移除目标接口；如果 Apifox 未删除该接口，请在客户端中手动删除。"""
 
 
 @mcp.tool()

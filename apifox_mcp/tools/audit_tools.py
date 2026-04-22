@@ -197,7 +197,7 @@ def check_api_responses(project_id: str, path: str, method: str) -> str:
         for m in check["missing"]:
             output.append(f"   • {m}")
         output.append("")
-        output.append("💡 使用 update_api_endpoint 可自动补充所有缺失响应")
+        output.append("💡 本 MCP 不会自动补齐错误响应；如需补充，请在 Apifox 中手动添加或通过显式响应定义写入。")
     
     return "\n".join(output)
 

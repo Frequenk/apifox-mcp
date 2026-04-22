@@ -468,7 +468,7 @@ def _build_openapi_spec(
     生成的 OpenAPI 规范结构：
     - 所有 request_body_schema → components/schemas/{Method}{Resource}Request
     - 所有 response_schema → components/schemas/{Resource}Response
-    - 所有错误响应 → components/schemas/ErrorResponse（共享）
+    - 显式传入的每个 response_schema → components/schemas/{Resource}Response 或 {Resource}Response{Code}
     
     Args:
         title: 接口名称
@@ -501,19 +501,6 @@ def _build_openapi_spec(
     """
     # 收集所有 Schema 到 components
     components_schemas = {}
-    
-    # 标准错误响应 Schema - 所有错误响应共用
-    error_schema_name = "ErrorResponse"
-    components_schemas[error_schema_name] = {
-        "type": "object",
-        "description": "标准错误响应",
-        "properties": {
-            "code": {"type": "integer", "description": "错误码"},
-            "message": {"type": "string", "description": "错误信息"},
-            "details": {"type": "object", "description": "详细信息"}
-        },
-        "required": ["code", "message"]
-    }
     
     # 构建参数列表
     parameters = []
@@ -604,15 +591,10 @@ def _build_openapi_spec(
                 content = {"application/json": {}}
                 
                 if resp.get("schema"):
-                    # 判断是成功响应还是错误响应
-                    if code_int >= 400:
-                        # 错误响应使用共享的 ErrorResponse
-                        content["application/json"]["schema"] = {"$ref": f"#/components/schemas/{error_schema_name}"}
-                    else:
-                        # 成功响应：生成独立的 Schema 名称
-                        resp_schema_name = _generate_schema_name(path, method, "Response", schema_prefix)
-                        components_schemas[resp_schema_name] = resp["schema"]
-                        content["application/json"]["schema"] = {"$ref": f"#/components/schemas/{resp_schema_name}"}
+                    suffix = "Response" if code_int == 200 else f"Response{code_int}"
+                    resp_schema_name = _generate_schema_name(path, method, suffix, schema_prefix)
+                    components_schemas[resp_schema_name] = resp["schema"]
+                    content["application/json"]["schema"] = {"$ref": f"#/components/schemas/{resp_schema_name}"}
                 
                 if resp.get("example"):
                     content["application/json"]["example"] = resp["example"]

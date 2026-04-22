@@ -5,8 +5,20 @@
 提供目录（标签/文件夹）管理功能。
 """
 
+import copy
+import json
+
 from ..config import mcp, logger
+from ..operation_log import _snapshot_folder, operation_logger
 from ..utils import _validate_config, _make_request, _resolve_project_id
+
+
+def _export_openapi(project_id: str):
+    export_payload = {"scope": {"type": "ALL"}, "options": {"includeApifoxExtensionProperties": True, "addFoldersToTags": True}, "oasVersion": "3.1", "exportFormat": "JSON"}
+    result = _make_request("POST", f"/projects/{project_id}/export-openapi?locale=zh-CN", data=export_payload)
+    if not result["success"]:
+        raise RuntimeError(result.get("error", "未知错误"))
+    return result.get("data", {})
 
 
 @mcp.tool()
@@ -55,16 +67,102 @@ def list_folders(project_id: str) -> str:
 
 @mcp.tool()
 def delete_folder(project_id: str, folder_name: str, confirm: bool = False) -> str:
-    """删除指定 Apifox 项目中的目录（标签）。⚠️ 警告: 此操作不可撤销！"""
+    """删除指定 Apifox 项目中的目录（标签），并记录操作日志。"""
     config_error = _validate_config(project_id)
     if config_error:
         return config_error
     resolved_project_id = _resolve_project_id(project_id)
-    
+
     if not confirm:
         return f"⚠️ 安全提示: 删除操作不可撤销!\n\n请确认要删除目录: {folder_name}\n\n如果确认删除，请将 confirm 参数设为 True:\ndelete_folder(folder_name=\"{folder_name}\", confirm=True)"
-    
-    return f"⚠️ 公开 API 暂不支持直接删除目录\n\n请在 Apifox 客户端中手动删除目录: {folder_name}\n项目 ID: {resolved_project_id}"
+
+    try:
+        openapi_data = _export_openapi(resolved_project_id)
+        before = _snapshot_folder(openapi_data, folder_name)
+    except (RuntimeError, KeyError) as exc:
+        return f"❌ 删除失败: {exc}"
+
+    delete_spec = copy.deepcopy(openapi_data)
+    delete_spec["tags"] = [
+        tag for tag in delete_spec.get("tags", [])
+        if (tag.get("name") if isinstance(tag, dict) else tag) != folder_name
+    ]
+    for methods in delete_spec.get("paths", {}).values():
+        for operation in methods.values():
+            if isinstance(operation, dict):
+                operation["tags"] = [tag for tag in operation.get("tags", []) if tag != folder_name]
+
+    import_spec = {
+        "openapi": "3.0.0",
+        "info": delete_spec.get("info", {"title": "Apifox API", "version": "1.0.0"}),
+        "paths": delete_spec.get("paths", {}),
+        "tags": delete_spec.get("tags", []),
+    }
+    if delete_spec.get("components"):
+        import_spec["components"] = delete_spec["components"]
+
+    import_payload = {
+        "input": json.dumps(import_spec),
+        "options": {
+            "targetEndpointFolderId": 0,
+            "targetSchemaFolderId": 0,
+            "endpointOverwriteBehavior": "OVERWRITE_EXISTING",
+            "schemaOverwriteBehavior": "OVERWRITE_EXISTING",
+        },
+    }
+    result = _make_request("POST", f"/projects/{resolved_project_id}/import-openapi?locale=zh-CN", data=import_payload)
+    if not result["success"]:
+        operation_logger.record(
+            operation="delete",
+            resource_type="folder",
+            project_id=resolved_project_id,
+            target={"folder_name": folder_name},
+            before=before,
+            after=None,
+            status="failed",
+            error=result.get("error", "未知错误"),
+        )
+        return f"❌ 删除失败: {result.get('error', '未知错误')}"
+
+    try:
+        after_openapi_data = _export_openapi(resolved_project_id)
+        _snapshot_folder(after_openapi_data, folder_name)
+        verify_error = "删除后复核失败: 目标仍存在"
+        log_entry = operation_logger.record(
+            operation="delete",
+            resource_type="folder",
+            project_id=resolved_project_id,
+            target={"folder_name": folder_name},
+            before=before,
+            after=None,
+            status="failed",
+            error=verify_error,
+        )
+        return f"⚠️ 目录删除请求已提交，但未实际删除\n\n📁 目录: {folder_name}\n操作日志: {log_entry['id']}\n\n写后复核:\n   • {verify_error}\n\n请在 Apifox 客户端中手动删除，或检查 Apifox OpenAPI 导入覆盖策略。"
+    except KeyError:
+        pass
+    except RuntimeError as exc:
+        log_entry = operation_logger.record(
+            operation="delete",
+            resource_type="folder",
+            project_id=resolved_project_id,
+            target={"folder_name": folder_name},
+            before=before,
+            after=None,
+            status="failed",
+            error=f"删除后复核失败: {exc}",
+        )
+        return f"⚠️ 目录删除请求已提交，但写后复核失败: {exc}\n\n操作日志: {log_entry['id']}"
+
+    log_entry = operation_logger.record(
+        operation="delete",
+        resource_type="folder",
+        project_id=resolved_project_id,
+        target={"folder_name": folder_name},
+        before=before,
+        after=None,
+    )
+    return f"✅ 目录删除请求已提交\n\n📁 目录: {folder_name}\n操作日志: {log_entry['id']}\n\n⚠️ 如果 Apifox 未删除该目录，请在客户端中手动删除。"
 
 
 @mcp.tool() 

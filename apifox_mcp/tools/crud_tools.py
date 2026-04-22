@@ -10,7 +10,6 @@ CRUD 批量生成工具
 - 资源模型 → components/schemas/{Resource}
 - 请求体 → components/schemas/Create{Resource}Request
 - 列表响应 → components/schemas/{Resource}ListResponse
-- 错误响应 → components/schemas/ErrorResponse（共享）
 
 所有接口的请求体和响应体都使用 $ref 引用公共组件，
 **绝不允许内联定义**。这确保了 Apifox 中的数据模型可复用、易维护。
@@ -19,43 +18,8 @@ CRUD 批量生成工具
 import json
 from typing import Optional, List, Dict
 
-from ..config import mcp, logger, HTTP_STATUS_CODES
+from ..config import mcp, logger
 from ..utils import _validate_config, _make_request, _build_openapi_spec, _resolve_project_id
-
-
-# ============================================================
-# 标准响应模板
-# ============================================================
-
-STANDARD_ERROR_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "code": {"type": "integer", "description": "错误码"},
-        "message": {"type": "string", "description": "错误信息"},
-        "details": {"type": "object", "description": "详细信息"}
-    },
-    "required": ["code", "message"]
-}
-
-STANDARD_ERROR_RESPONSES = {
-    400: {"code": 400, "name": "请求参数错误", "schema": STANDARD_ERROR_SCHEMA, "example": {"code": 400, "message": "请求参数错误"}},
-    401: {"code": 401, "name": "未授权", "schema": STANDARD_ERROR_SCHEMA, "example": {"code": 401, "message": "未授权，请先登录"}},
-    403: {"code": 403, "name": "禁止访问", "schema": STANDARD_ERROR_SCHEMA, "example": {"code": 403, "message": "无权限访问此资源"}},
-    404: {"code": 404, "name": "资源不存在", "schema": STANDARD_ERROR_SCHEMA, "example": {"code": 404, "message": "请求的资源不存在"}},
-    409: {"code": 409, "name": "资源冲突", "schema": STANDARD_ERROR_SCHEMA, "example": {"code": 409, "message": "资源已存在或状态冲突"}},
-    422: {"code": 422, "name": "实体无法处理", "schema": STANDARD_ERROR_SCHEMA, "example": {"code": 422, "message": "请求格式正确但语义错误"}},
-    500: {"code": 500, "name": "服务器内部错误", "schema": STANDARD_ERROR_SCHEMA, "example": {"code": 500, "message": "服务器内部错误，请稍后重试"}},
-    502: {"code": 502, "name": "网关错误", "schema": STANDARD_ERROR_SCHEMA, "example": {"code": 502, "message": "网关错误，上游服务不可用"}},
-    503: {"code": 503, "name": "服务不可用", "schema": STANDARD_ERROR_SCHEMA, "example": {"code": 503, "message": "服务暂时不可用，请稍后重试"}}
-}
-
-
-def _get_error_responses(method: str) -> List[Dict]:
-    """获取指定方法的标准错误响应"""
-    codes = [400, 401, 403, 404, 500, 502, 503]
-    if method in ["POST", "PUT", "PATCH"]:
-        codes.extend([409, 422])
-    return [STANDARD_ERROR_RESPONSES[c].copy() for c in codes if c in STANDARD_ERROR_RESPONSES]
 
 
 def _build_list_schema(item_schema_or_ref: Dict, resource_name_cn: str) -> Dict:
@@ -261,10 +225,6 @@ def generate_crud_apis(
     list_schema = _build_list_schema({"$ref": f"#/components/schemas/{resource_schema_name}"}, resource_name_cn)
     components_schemas[list_response_schema_name] = list_schema
     
-    # 错误响应模型
-    error_schema_name = "ErrorResponse"
-    components_schemas[error_schema_name] = STANDARD_ERROR_SCHEMA
-    
     # ============================================================
     # 构建接口（使用 $ref 引用）
     # ============================================================
@@ -283,7 +243,7 @@ def generate_crud_apis(
                 {"name": "page", "in": "query", "required": False, "description": "页码", "schema": {"type": "integer", "default": 1}},
                 {"name": "page_size", "in": "query", "required": False, "description": "每页数量", "schema": {"type": "integer", "default": 20}}
             ],
-            "responses": _build_responses_with_ref(200, "成功", list_response_schema_name, list_example, "GET", error_schema_name)
+            "responses": _build_responses_with_ref(200, "成功", list_response_schema_name, list_example)
         }
         created_apis.append(f"GET {base_path}")
     
@@ -299,7 +259,7 @@ def generate_crud_apis(
             "parameters": [
                 {"name": id_field, "in": "path", "required": True, "description": f"{resource_name_cn}ID", "schema": {"type": id_type}}
             ],
-            "responses": _build_responses_with_ref(200, "成功", resource_schema_name, item_example, "GET", error_schema_name)
+            "responses": _build_responses_with_ref(200, "成功", resource_schema_name, item_example)
         }
         created_apis.append(f"GET {detail_path}")
     
@@ -318,7 +278,7 @@ def generate_crud_apis(
                     "example": create_example
                 }}
             },
-            "responses": _build_responses_with_ref(201, "创建成功", resource_schema_name, item_example, "POST", error_schema_name)
+            "responses": _build_responses_with_ref(201, "创建成功", resource_schema_name, item_example)
         }
         created_apis.append(f"POST {base_path}")
     
@@ -341,7 +301,7 @@ def generate_crud_apis(
                     "example": create_example
                 }}
             },
-            "responses": _build_responses_with_ref(200, "更新成功", resource_schema_name, item_example, "PUT", error_schema_name)
+            "responses": _build_responses_with_ref(200, "更新成功", resource_schema_name, item_example)
         }
         created_apis.append(f"PUT {detail_path}")
     
@@ -357,7 +317,7 @@ def generate_crud_apis(
             "parameters": [
                 {"name": id_field, "in": "path", "required": True, "description": f"{resource_name_cn}ID", "schema": {"type": id_type}}
             ],
-            "responses": _build_responses_with_ref(204, "删除成功", None, None, "DELETE", error_schema_name)
+            "responses": _build_responses_with_ref(204, "删除成功", None, None)
         }
         created_apis.append(f"DELETE {detail_path}")
     
@@ -376,7 +336,7 @@ def generate_crud_apis(
             "targetEndpointFolderId": folder_id,
             "targetSchemaFolderId": 0,
             "endpointOverwriteBehavior": "CREATE_NEW",  # 接口不覆盖，避免意外修改
-            # Schema 使用覆盖策略，避免重复创建相同的 Schema（如 ErrorResponse）
+            # Schema 使用覆盖策略，避免重复创建相同的 Schema
             "schemaOverwriteBehavior": "OVERWRITE_EXISTING"
         }
     }
@@ -403,27 +363,23 @@ def generate_crud_apis(
 📌 生成的接口:
 {chr(10).join('   • ' + api for api in created_apis)}
 
-💡 系统已自动添加标准错误响应 (400/401/403/404/500)"""
+💡 错误响应不会自动补齐；如需 400/401/500 等响应，请手动在 Apifox 中补充或使用显式响应定义。"""
 
 
 def _build_responses_with_ref(
     code: int, 
     name: str, 
     schema_name: Optional[str], 
-    example: Optional[Dict], 
-    method: str,
-    error_schema_name: str = "ErrorResponse"
+    example: Optional[Dict]
 ) -> Dict:
     """
-    构建响应对象（使用 $ref 引用，包含成功响应和错误响应）
+    构建响应对象（使用 $ref 引用，只包含显式成功响应）
     
     Args:
         code: 成功响应状态码
         name: 响应名称
         schema_name: 成功响应的 Schema 名称（用于 $ref 引用）
         example: 成功响应示例
-        method: HTTP 方法
-        error_schema_name: 错误响应 Schema 名称
     """
     responses = {}
     
@@ -440,25 +396,12 @@ def _build_responses_with_ref(
                 resp["content"]["application/json"]["example"] = example
         responses[str(code)] = resp
     
-    # 错误响应（使用 $ref 引用共享的 ErrorResponse）
-    for err_resp in _get_error_responses(method):
-        err_code = str(err_resp["code"])
-        responses[err_code] = {
-            "description": err_resp["name"],
-            "content": {
-                "application/json": {
-                    "schema": {"$ref": f"#/components/schemas/{error_schema_name}"},
-                    "example": err_resp["example"]
-                }
-            }
-        }
-    
     return responses
 
 
 # 保留旧函数以保持向后兼容
 def _build_responses(code: int, name: str, schema: Optional[Dict], example: Optional[Dict], method: str) -> Dict:
-    """[已废弃] 请使用 _build_responses_with_ref 代替"""
+    """[已废弃] 请使用 _build_responses_with_ref 代替。不会自动补齐错误响应。"""
     responses = {}
     
     if schema or code == 204:
@@ -468,12 +411,5 @@ def _build_responses(code: int, name: str, schema: Optional[Dict], example: Opti
             if example:
                 resp["content"]["application/json"]["example"] = example
         responses[str(code)] = resp
-    
-    for err_resp in _get_error_responses(method):
-        err_code = str(err_resp["code"])
-        responses[err_code] = {
-            "description": err_resp["name"],
-            "content": {"application/json": {"schema": err_resp["schema"], "example": err_resp["example"]}}
-        }
     
     return responses
