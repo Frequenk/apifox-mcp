@@ -14,6 +14,7 @@ API 接口管理工具
 
 import copy
 import json
+import time
 from typing import Optional, List, Dict, Tuple, Any
 
 from ..config import (
@@ -23,9 +24,17 @@ from ..config import (
 from ..operation_log import _snapshot_endpoint, operation_logger
 from ..utils import _validate_config, _make_request, _build_openapi_spec, _resolve_project_id
 
+_OPENAPI_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+_OPENAPI_CACHE_TTL_SECONDS = 60
+
 
 def _export_openapi(project_id: str) -> Dict[str, Any]:
     """导出完整 OpenAPI 文档。"""
+    cached = _OPENAPI_CACHE.get(project_id)
+    now = time.time()
+    if cached and now - cached[0] <= _OPENAPI_CACHE_TTL_SECONDS:
+        return copy.deepcopy(cached[1])
+
     export_payload = {
         "scope": {"type": "ALL"},
         "options": {"includeApifoxExtensionProperties": True, "addFoldersToTags": False},
@@ -35,7 +44,13 @@ def _export_openapi(project_id: str) -> Dict[str, Any]:
     result = _make_request("POST", f"/projects/{project_id}/export-openapi?locale=zh-CN", data=export_payload)
     if not result["success"]:
         raise RuntimeError(result.get("error", "未知错误"))
-    return result.get("data", {})
+    data = result.get("data", {})
+    _OPENAPI_CACHE[project_id] = (now, copy.deepcopy(data))
+    return data
+
+
+def _invalidate_openapi_cache(project_id: str) -> None:
+    _OPENAPI_CACHE.pop(project_id, None)
 
 
 def _get_operation(openapi_data: Dict[str, Any], path: str, method: str) -> Tuple[Dict[str, Any], str]:
@@ -176,6 +191,138 @@ def _validate_schema_has_descriptions(schema: Dict, path: str = "") -> List[str]
 def _normalize_explicit_responses(responses: Optional[List[Dict]]) -> List[Dict]:
     """仅保留调用方显式传入的响应定义，不做自动补齐。"""
     return list(responses or [])
+
+
+def _deep_merge_keep_existing(target: Dict[str, Any], patch: Dict[str, Any]) -> Dict[str, Any]:
+    """递归合并 OpenAPI 片段；required 数组采用并集语义。"""
+    for key, value in (patch or {}).items():
+        if key == "required" and isinstance(value, list):
+            existing = target.setdefault(key, [])
+            for item in value:
+                if item not in existing:
+                    existing.append(item)
+            continue
+
+        if (
+            isinstance(value, dict)
+            and isinstance(target.get(key), dict)
+        ):
+            _deep_merge_keep_existing(target[key], value)
+            continue
+
+        target[key] = copy.deepcopy(value)
+
+    return target
+
+
+def _normalize_parameter(param: Dict[str, Any], location: str) -> Dict[str, Any]:
+    """兼容简写参数和完整 OpenAPI parameter。"""
+    normalized = copy.deepcopy(param)
+    normalized["in"] = location
+    normalized["required"] = bool(normalized.get("required", False)) if location != "path" else True
+    normalized.setdefault("description", "")
+
+    schema = normalized.get("schema")
+    if not isinstance(schema, dict):
+        schema = {"type": normalized.pop("type", "string")}
+    elif "type" in normalized:
+        normalized.pop("type", None)
+
+    for key in ["enum", "default"]:
+        if key in normalized:
+            schema[key] = normalized.pop(key)
+
+    normalized["schema"] = schema
+    return normalized
+
+
+def _replace_parameters_by_location(
+    operation: Dict[str, Any],
+    location: str,
+    params: Optional[List[Dict[str, Any]]]
+) -> None:
+    if params is None:
+        return
+
+    kept = [
+        parameter
+        for parameter in operation.get("parameters", [])
+        if parameter.get("in") != location
+    ]
+    operation["parameters"] = kept + [
+        _normalize_parameter(parameter, location)
+        for parameter in params
+    ]
+
+
+def _get_json_content(operation: Dict[str, Any], response_code: str, content_type: str) -> Dict[str, Any]:
+    return (
+        operation
+        .setdefault("responses", {})
+        .setdefault(str(response_code), {"description": "成功"})
+        .setdefault("content", {})
+        .setdefault(content_type, {})
+    )
+
+
+def _resolve_schema_for_patch(
+    openapi_data: Dict[str, Any],
+    content: Dict[str, Any]
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    schema = content.get("schema")
+    if not isinstance(schema, dict):
+        return None, None
+
+    ref = schema.get("$ref")
+    if isinstance(ref, str) and ref.startswith("#/components/schemas/"):
+        schema_name = ref.rsplit("/", 1)[-1]
+        return openapi_data.get("components", {}).get("schemas", {}).get(schema_name), schema_name
+
+    return schema, None
+
+
+def _snapshot_patch_summary(operation: Dict[str, Any], response_code: str, content_type: str) -> Dict[str, Any]:
+    content = (
+        operation
+        .get("responses", {})
+        .get(str(response_code), {})
+        .get("content", {})
+        .get(content_type, {})
+    )
+    example = content.get("example")
+
+    return {
+        "summary": operation.get("summary", ""),
+        "description": operation.get("description", ""),
+        "tags": operation.get("tags", []),
+        "parameters": [
+            parameter.get("name", "")
+            for parameter in operation.get("parameters", [])
+        ],
+        "response_example_keys": sorted(example.keys()) if isinstance(example, dict) else [],
+    }
+
+
+def _format_patch_review(
+    before: Dict[str, Any],
+    after: Dict[str, Any],
+    schema_fields: List[str]
+) -> List[str]:
+    lines = []
+    if before.get("summary") != after.get("summary"):
+        lines.append(f"   • 名称: {before.get('summary')!r} -> {after.get('summary')!r}")
+    if before.get("description") != after.get("description"):
+        lines.append("   • 描述已更新")
+    if before.get("tags") != after.get("tags"):
+        lines.append(f"   • 标签: {before.get('tags')} -> {after.get('tags')}")
+    if before.get("parameters") != after.get("parameters"):
+        lines.append(f"   • 参数: {', '.join(after.get('parameters', [])) or '无'}")
+    if schema_fields:
+        lines.append(f"   • 响应字段: {', '.join(schema_fields)}")
+    if before.get("response_example_keys") != after.get("response_example_keys"):
+        lines.append(f"   • 响应示例字段: {', '.join(after.get('response_example_keys', [])) or '无'}")
+
+    return lines or ["   • 无关键差异"]
 
 
 @mcp.tool()
@@ -385,6 +532,8 @@ def patch_api_endpoint_metadata(
         )
         return f"❌ 更新失败: {result.get('error', '未知错误')}"
 
+    _invalidate_openapi_cache(resolved_project_id)
+
     try:
         after_openapi_data = _export_openapi(resolved_project_id)
         after_operation, _ = _get_operation(after_openapi_data, path, method)
@@ -416,6 +565,207 @@ def patch_api_endpoint_metadata(
     )
 
     output = ["✅ 接口元信息更新成功", "", "写后复核:", *post_diff_lines]
+    if losses:
+        output.append("")
+        output.append("⚠️ 检测到非预期信息丢失: " + ", ".join(losses))
+    output.append("")
+    output.append(f"操作日志: {log_entry['id']}")
+    return "\n".join(output)
+
+
+@mcp.tool()
+def patch_api_endpoint_operation(
+    path: str,
+    method: str,
+    project_id: str = "",
+    title: Optional[str] = None,
+    description: Optional[str] = None,
+    tags: Optional[List[str]] = None,
+    query_params: Optional[List[Dict[str, Any]]] = None,
+    header_params: Optional[List[Dict[str, Any]]] = None,
+    path_params: Optional[List[Dict[str, Any]]] = None,
+    response_schema_patch: Optional[Dict[str, Any]] = None,
+    response_example_patch: Optional[Dict[str, Any]] = None,
+    request_body_schema_patch: Optional[Dict[str, Any]] = None,
+    request_body_example_patch: Optional[Dict[str, Any]] = None,
+    response_code: str = "200",
+    content_type: str = "application/json",
+    dry_run: bool = False
+) -> str:
+    """
+    安全地局部更新接口 operation。
+
+    适用于旧接口的小改动：参数、描述、标签、响应 Schema 片段、响应示例片段、请求体 Schema/示例片段。
+    本工具会导出完整 OpenAPI，只合并指定片段，保留未触达的参数、请求体、响应、示例和 components，并在写入后复核。
+    """
+    config_error = _validate_config(project_id)
+    if config_error:
+        return config_error
+    resolved_project_id = _resolve_project_id(project_id)
+
+    changed_fields = []
+    if title is not None:
+        changed_fields.append("summary")
+    if description is not None:
+        changed_fields.append("description")
+    if tags is not None:
+        changed_fields.append("tags")
+    if query_params is not None:
+        changed_fields.append("query_params")
+    if header_params is not None:
+        changed_fields.append("header_params")
+    if path_params is not None:
+        changed_fields.append("path_params")
+    if response_schema_patch is not None:
+        changed_fields.append("response_schema")
+    if response_example_patch is not None:
+        changed_fields.append("response_example")
+    if request_body_schema_patch is not None:
+        changed_fields.append("request_body_schema")
+    if request_body_example_patch is not None:
+        changed_fields.append("request_body_example")
+
+    if not changed_fields:
+        return "⚠️ 未提供任何要修改的字段"
+
+    try:
+        openapi_data = _export_openapi(resolved_project_id)
+        operation, method_lower = _get_operation(openapi_data, path, method)
+    except (RuntimeError, KeyError) as exc:
+        return f"❌ 获取失败: {exc}"
+
+    updated_operation = copy.deepcopy(operation)
+    before_review = _snapshot_patch_summary(operation, response_code, content_type)
+
+    if title is not None:
+        updated_operation["summary"] = title
+    if description is not None:
+        updated_operation["description"] = description
+    if tags is not None:
+        updated_operation["tags"] = tags
+
+    _replace_parameters_by_location(updated_operation, "query", query_params)
+    _replace_parameters_by_location(updated_operation, "header", header_params)
+    _replace_parameters_by_location(updated_operation, "path", path_params)
+
+    if request_body_schema_patch is not None:
+        request_content = (
+            updated_operation
+            .setdefault("requestBody", {})
+            .setdefault("content", {})
+            .setdefault(content_type, {})
+        )
+        request_schema, _ = _resolve_schema_for_patch(openapi_data, request_content)
+        if request_schema is None:
+            return "❌ 请求体 Schema 不存在，无法执行 request_body_schema_patch"
+        _deep_merge_keep_existing(request_schema, request_body_schema_patch)
+
+    if request_body_example_patch is not None:
+        request_content = (
+            updated_operation
+            .setdefault("requestBody", {})
+            .setdefault("content", {})
+            .setdefault(content_type, {})
+        )
+        request_example = request_content.setdefault("example", {})
+        if not isinstance(request_example, dict):
+            return "❌ 请求体 example 不是对象，无法执行 request_body_example_patch"
+        _deep_merge_keep_existing(request_example, request_body_example_patch)
+
+    response_schema_fields = []
+    response_content = _get_json_content(updated_operation, str(response_code), content_type)
+    if response_schema_patch is not None:
+        response_schema, _ = _resolve_schema_for_patch(openapi_data, response_content)
+        if response_schema is None:
+            return "❌ 响应 Schema 不存在，无法执行 response_schema_patch"
+        _deep_merge_keep_existing(response_schema, response_schema_patch)
+        response_schema_fields = list((response_schema.get("properties") or {}).keys())
+
+    if response_example_patch is not None:
+        response_example = response_content.setdefault("example", {})
+        if not isinstance(response_example, dict):
+            return "❌ 响应 example 不是对象，无法执行 response_example_patch"
+        _deep_merge_keep_existing(response_example, response_example_patch)
+
+    after_review = _snapshot_patch_summary(updated_operation, response_code, content_type)
+    review_lines = _format_patch_review(before_review, after_review, response_schema_fields)
+    openapi_spec = _build_single_operation_spec(openapi_data, path, method_lower, updated_operation)
+
+    if dry_run:
+        return (
+            "🔎 DRY-RUN: 接口将按以下方式局部更新，不会写入 Apifox\n\n"
+            f"目标: {method.upper()} {path}\n"
+            f"字段: {', '.join(changed_fields)}\n"
+            "变更摘要:\n" + "\n".join(review_lines) +
+            "\n\n紧凑预览:\n" + _compact_spec_preview(openapi_spec, path, method, changed_fields)
+        )
+
+    import_payload = {
+        "input": json.dumps(openapi_spec),
+        "options": {
+            "targetEndpointFolderId": 0,
+            "targetSchemaFolderId": 0,
+            "endpointOverwriteBehavior": "OVERWRITE_EXISTING",
+            "schemaOverwriteBehavior": "OVERWRITE_EXISTING"
+        }
+    }
+
+    result = _make_request("POST", f"/projects/{resolved_project_id}/import-openapi?locale=zh-CN", data=import_payload)
+    if not result["success"]:
+        operation_logger.record(
+            operation="patch",
+            resource_type="endpoint",
+            project_id=resolved_project_id,
+            target={"path": path, "method": method.upper()},
+            before=operation,
+            after=None,
+            status="failed",
+            error=result.get("error", "未知错误"),
+            context=_endpoint_log_context(openapi_data),
+        )
+        return f"❌ 更新失败: {result.get('error', '未知错误')}"
+
+    _invalidate_openapi_cache(resolved_project_id)
+
+    try:
+        after_openapi_data = _export_openapi(resolved_project_id)
+        after_operation, _ = _get_operation(after_openapi_data, path, method)
+        post_write = _snapshot_patch_summary(after_operation, response_code, content_type)
+        post_review_lines = _format_patch_review(before_review, post_write, response_schema_fields)
+        losses = _detect_unexpected_loss(_operation_snapshot(operation), _operation_snapshot(after_operation))
+    except (RuntimeError, KeyError) as exc:
+        operation_logger.record(
+            operation="patch",
+            resource_type="endpoint",
+            project_id=resolved_project_id,
+            target={"path": path, "method": method.upper()},
+            before=operation,
+            after=updated_operation,
+            status="failed",
+            error=f"写后复核失败: {exc}",
+            context=_endpoint_log_context(openapi_data),
+        )
+        return "⚠️ 接口已写入，但写后复核失败: " + str(exc)
+
+    log_entry = operation_logger.record(
+        operation="patch",
+        resource_type="endpoint",
+        project_id=resolved_project_id,
+        target={"path": path, "method": method.upper()},
+        before=operation,
+        after=after_operation,
+        context=_endpoint_log_context(openapi_data),
+    )
+
+    output = [
+        "✅ 接口局部更新成功",
+        "",
+        f"目标: {method.upper()} {path}",
+        f"字段: {', '.join(changed_fields)}",
+        "",
+        "写后复核:",
+        *post_review_lines,
+    ]
     if losses:
         output.append("")
         output.append("⚠️ 检测到非预期信息丢失: " + ", ".join(losses))
@@ -544,6 +894,8 @@ def batch_patch_api_endpoint_titles(
             )
             outputs.append(f"❌ {method.upper()} {path}: 更新失败: {result.get('error', '未知错误')}")
             continue
+
+        _invalidate_openapi_cache(resolved_project_id)
 
         try:
             after_openapi_data = _export_openapi(resolved_project_id)
@@ -891,6 +1243,8 @@ def create_api_endpoint(
             error=result.get("error", "未知错误"),
         )
         return f"❌ 创建失败: {result.get('error', '未知错误')}"
+
+    _invalidate_openapi_cache(resolved_project_id)
     
     counters = result.get("data", {}).get("data", {}).get("counters", {})
     created = counters.get("endpointCreated", 0)
@@ -1105,6 +1459,8 @@ update_api_endpoint 会全量覆盖接口定义，未传入的参数、请求体
             context=before_context,
         )
         return f"❌ 更新失败: {result.get('error', '未知错误')}"
+
+    _invalidate_openapi_cache(resolved_project_id)
     
     try:
         after_openapi_data = _export_openapi(resolved_project_id)

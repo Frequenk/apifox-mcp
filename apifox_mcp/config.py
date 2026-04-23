@@ -7,6 +7,8 @@
 
 import os
 import logging
+import functools
+import traceback
 from mcp.server.fastmcp import FastMCP
 
 # ============================================================
@@ -18,10 +20,37 @@ logging.basicConfig(
 )
 logger = logging.getLogger("ApifoxMCP")
 
+class SafeFastMCP(FastMCP):
+    """统一兜住工具异常，避免单个工具异常导致 MCP transport 关闭。"""
+
+    def tool(self, *args, **kwargs):
+        decorator = super().tool(*args, **kwargs)
+
+        def safe_decorator(func):
+            @functools.wraps(func)
+            def wrapper(*func_args, **func_kwargs):
+                try:
+                    return func(*func_args, **func_kwargs)
+                except Exception as exc:
+                    logger.error(
+                        "MCP 工具执行异常: %s",
+                        func.__name__,
+                        exc_info=True,
+                    )
+                    return (
+                        f"❌ MCP 工具执行异常: {func.__name__}: {exc}\n"
+                        f"{traceback.format_exc(limit=8)}"
+                    )
+
+            return decorator(wrapper)
+
+        return safe_decorator
+
+
 # ============================================================
 # MCP 服务初始化
 # ============================================================
-mcp = FastMCP(
+mcp = SafeFastMCP(
     name="Apifox-Builder",
 )
 

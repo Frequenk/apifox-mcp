@@ -88,6 +88,26 @@ def _execute_endpoint(project_id: str, operation: str, item: Dict[str, Any]) -> 
             return "❌ update/endpoint 必须设置 confirm_replace=true"
         return api_tools.update_api_endpoint(project_id=project_id, **_without_control_fields(item))
     if operation == "patch":
+        if _is_operation_patch(item):
+            return api_tools.patch_api_endpoint_operation(
+                project_id=project_id,
+                path=item.get("path", ""),
+                method=item.get("method", "GET"),
+                title=item.get("title"),
+                description=item.get("description"),
+                tags=item.get("tags"),
+                query_params=item.get("query_params"),
+                header_params=item.get("header_params"),
+                path_params=item.get("path_params"),
+                response_schema_patch=item.get("response_schema_patch"),
+                response_example_patch=item.get("response_example_patch"),
+                request_body_schema_patch=item.get("request_body_schema_patch"),
+                request_body_example_patch=item.get("request_body_example_patch"),
+                response_code=str(item.get("response_code", "200")),
+                content_type=item.get("content_type", "application/json"),
+                dry_run=bool(item.get("dry_run", False)),
+            )
+
         return api_tools.patch_api_endpoint_metadata(
             project_id=project_id,
             path=item.get("path", ""),
@@ -139,9 +159,27 @@ def _validate_item(operation: str, resource_type: str, item: Dict[str, Any]) -> 
         return [f"不支持的操作 {operation}/{resource_type}"]
     missing = [field for field in required if not item.get(field)]
     if resource_type == "endpoint" and operation == "patch":
-        if item.get("title") is None and item.get("description") is None and item.get("tags") is None:
-            missing.append("title/description/tags 之一")
+        if (
+            item.get("title") is None
+            and item.get("description") is None
+            and item.get("tags") is None
+            and not _is_operation_patch(item)
+        ):
+            missing.append("title/description/tags/operation patch 字段之一")
     return missing
+
+
+def _is_operation_patch(item: Dict[str, Any]) -> bool:
+    operation_patch_fields = [
+        "query_params",
+        "header_params",
+        "path_params",
+        "response_schema_patch",
+        "response_example_patch",
+        "request_body_schema_patch",
+        "request_body_example_patch",
+    ]
+    return any(field in item for field in operation_patch_fields)
 
 
 def _manual_delete_guidance(resource_type: str, item: Dict[str, Any]) -> str:

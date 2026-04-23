@@ -21,6 +21,7 @@
     *   获取完整接口快照 (`get_api_endpoint_snapshot`) - 修改旧接口前建议先读取
     *   创建接口 (`create_api_endpoint`) - 只写入显式传入的响应
     *   安全更新接口元信息 (`patch_api_endpoint_metadata`) - 只改名称、描述、标签并保留原内容
+    *   安全局部更新接口 (`patch_api_endpoint_operation`) - 可一次更新参数、请求/响应 Schema 片段和示例，并做写后复核
     *   批量安全修改接口名称 (`batch_patch_api_endpoint_titles`) - 只改名称并做写后复核
     *   全量替换接口 (`update_api_endpoint`) - 需要 `confirm_replace=True`
     *   接口完整性检查 (`check_api_responses`, `audit_all_api_responses`)
@@ -339,6 +340,51 @@ patch_api_endpoint_metadata(project_id, path, method, title?, description?, tags
 
 该工具会先导出完整接口定义，只替换指定字段，再导入覆盖。写入后会重新导出接口做复核，并返回紧凑 diff，例如名称、描述、标签、响应码变化，以及参数/请求体/响应是否出现非预期丢失。
 
+当需要同时修改参数、请求体、响应字段或示例时，优先使用：
+
+```text
+patch_api_endpoint_operation(
+  path,
+  method,
+  project_id?,
+  title?,
+  description?,
+  tags?,
+  query_params?,
+  header_params?,
+  path_params?,
+  request_body_schema_patch?,
+  request_body_example_patch?,
+  response_schema_patch?,
+  response_example_patch?,
+  response_code="200",
+  content_type="application/json",
+  dry_run=False
+)
+```
+
+该工具适合“已有接口加参数、补响应字段、更新 example”这类高频文档维护任务。它会保留未触达的参数、请求体、响应码、示例和 components，只对传入片段做递归合并；`required` 字段采用追加并集语义。写入后会自动复核参数名、响应示例字段和关键差异。
+
+示例：
+
+```text
+patch_api_endpoint_operation(
+  path="/jp/wechat/user/get-oss-config",
+  method="GET",
+  query_params=[
+    {"name":"scene","type":"string","description":"OSS 使用场景","enum":["TEMP_PHOTO","REFUND_CREDENTIAL"],"required":false},
+    {"name":"order_no","type":"string","description":"退款凭证场景下的订单号","required":false}
+  ],
+  response_schema_patch={
+    "properties":{"scene":{"type":"string","description":"OSS 使用场景"}},
+    "required":["scene"]
+  },
+  response_example_patch={"data":{"scene":"REFUND_CREDENTIAL"}}
+)
+```
+
+如果 `APIFOX_PROJECTS` 只配置了一个项目，`project_id` 可以不传；如果配置多个项目，可以传项目 ID 或项目名称。
+
 ### 全量替换需要确认
 
 `update_api_endpoint` 是全量替换工具，默认拒绝执行。只有确认要重建完整接口定义时，才设置：
@@ -391,6 +437,7 @@ batch_execute(project_id, items=[...])
 - 批量只读名称、描述、标签、参数数量、响应码时，优先使用 `batch_get_api_endpoint_summaries`，避免把完整 schema/components 塞进上下文。
 - 批量修改接口名称时，可以使用 `batch_patch_api_endpoint_titles`；更通用的批量 create/update/patch 使用 `batch_execute`。
 - 修改旧接口的名称、描述或标签时，优先使用 `patch_api_endpoint_metadata`，该工具会保留原参数、请求体、响应、示例和组件引用。
+- 修改旧接口的参数、请求体字段、响应字段或示例时，优先使用 `patch_api_endpoint_operation`，避免读取完整快照后手动重组 OpenAPI。
 - `update_api_endpoint` 是全量替换工具，默认会拒绝执行；只有确认要重建完整接口时才设置 `confirm_replace=True`。
 - 修改旧接口前建议先调用 `get_api_endpoint_snapshot` 查看完整结构化快照。
 - MCP 不执行删除。需要删除接口、数据模型或目录时，请先用轻量查询工具列出目标，再在 Apifox 客户端中手动删除。

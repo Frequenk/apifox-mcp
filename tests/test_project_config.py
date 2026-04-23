@@ -77,6 +77,30 @@ class ProjectConfigTests(unittest.TestCase):
         self.assertIn("未配置的 project_id", str(ctx.exception))
         self.assertIn("7575229", str(ctx.exception))
 
+    def test_resolve_project_id_defaults_when_only_one_project_is_configured(self):
+        os.environ["APIFOX_TOKEN"] = "token"
+        os.environ["APIFOX_PROJECTS"] = '[{"name":"主项目","id":"7575229"}]'
+
+        utils = importlib.import_module("apifox_mcp.utils")
+
+        self.assertEqual(utils._resolve_project_id(""), "7575229")
+        self.assertEqual(utils._resolve_project_id(None), "7575229")
+
+    def test_tool_wrapper_returns_structured_error_instead_of_raising(self):
+        os.environ["APIFOX_TOKEN"] = "token"
+        os.environ["APIFOX_PROJECTS"] = '[{"name":"主项目","id":"7575229"}]'
+
+        config = importlib.import_module("apifox_mcp.config")
+
+        @config.mcp.tool()
+        def explode():
+            raise RuntimeError("boom")
+
+        result = explode()
+
+        self.assertIn("MCP 工具执行异常", result)
+        self.assertIn("boom", result)
+
     def test_response_consistency_no_envelope_recommendation(self):
         os.environ["APIFOX_TOKEN"] = "token"
         os.environ["APIFOX_PROJECTS"] = '[{"name":"主项目","id":"7575229"}]'
@@ -538,6 +562,95 @@ class ProjectConfigTests(unittest.TestCase):
 
         self.assertIn("批量更新完成", result)
         self.assertIn("写后复核", result)
+
+    def test_patch_api_endpoint_operation_updates_params_response_schema_and_example(self):
+        os.environ["APIFOX_TOKEN"] = "token"
+        os.environ["APIFOX_PROJECTS"] = '[{"name":"主项目","id":"7575229"}]'
+        module = importlib.import_module("apifox_mcp.tools.api_tools")
+        openapi_data = make_openapi_fixture()
+        imports = []
+
+        def fake_request(method, endpoint, data=None, params=None, use_public_api=True):
+            if endpoint.endswith("/export-openapi?locale=zh-CN"):
+                if imports:
+                    return {"success": True, "data": deepcopy(imports[-1])}
+                return {"success": True, "data": deepcopy(openapi_data)}
+            if endpoint.endswith("/import-openapi?locale=zh-CN"):
+                imported = json_loads(data["input"])
+                imports.append(imported)
+                operation = imported["paths"]["/orders"]["post"]
+                params = operation["parameters"]
+                self.assertEqual([param["name"] for param in params], ["scene", "order_no"])
+                self.assertEqual(operation["description"], "新接口描述")
+                schema = imported["components"]["schemas"]["OrderResponse"]
+                self.assertIn("scene", schema["properties"])
+                example = operation["responses"]["200"]["content"]["application/json"]["example"]
+                self.assertEqual(example["status"], "created")
+                self.assertEqual(example["scene"], "REFUND_CREDENTIAL")
+                return {"success": True, "data": {"data": {"counters": {"endpointUpdated": 1}}}}
+            raise AssertionError(endpoint)
+
+        module._make_request = fake_request
+
+        result = module.patch_api_endpoint_operation(
+            project_id="",
+            path="/orders",
+            method="POST",
+            description="新接口描述",
+            query_params=[
+                {
+                    "name": "scene",
+                    "type": "string",
+                    "required": False,
+                    "description": "使用场景",
+                    "example": "REFUND_CREDENTIAL",
+                },
+                {
+                    "name": "order_no",
+                    "type": "string",
+                    "required": False,
+                    "description": "订单号",
+                    "example": "JP202604230001",
+                },
+            ],
+            response_schema_patch={
+                "properties": {
+                    "scene": {"type": "string", "description": "使用场景"}
+                },
+                "required": ["scene"],
+            },
+            response_example_patch={"scene": "REFUND_CREDENTIAL"},
+        )
+
+        self.assertIn("✅ 接口局部更新成功", result)
+        self.assertIn("写后复核", result)
+        self.assertIn("scene, order_no", result)
+        self.assertEqual(len(imports), 1)
+
+    def test_patch_api_endpoint_operation_dry_run_does_not_import(self):
+        os.environ["APIFOX_TOKEN"] = "token"
+        os.environ["APIFOX_PROJECTS"] = '[{"name":"主项目","id":"7575229"}]'
+        module = importlib.import_module("apifox_mcp.tools.api_tools")
+
+        def fake_request(method, endpoint, data=None, params=None, use_public_api=True):
+            if endpoint.endswith("/export-openapi?locale=zh-CN"):
+                return {"success": True, "data": make_openapi_fixture()}
+            if endpoint.endswith("/import-openapi?locale=zh-CN"):
+                raise AssertionError("dry_run must not import")
+            raise AssertionError(endpoint)
+
+        module._make_request = fake_request
+
+        result = module.patch_api_endpoint_operation(
+            project_id="",
+            path="/orders",
+            method="POST",
+            query_params=[{"name": "scene", "type": "string", "description": "使用场景"}],
+            dry_run=True,
+        )
+
+        self.assertIn("DRY-RUN", result)
+        self.assertIn("query_params", result)
 
 def json_loads(text):
     import json

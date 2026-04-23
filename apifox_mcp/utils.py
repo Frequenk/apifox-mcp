@@ -161,13 +161,21 @@ def _format_project_options() -> str:
     return "\n".join(f"   • {project['name']}: {project['id']}" for project in projects)
 
 
-def _resolve_project_id(project_id: str) -> str:
+def _resolve_project_id(project_id: Optional[str]) -> str:
     """校验并返回显式传入的 Apifox 项目 ID。"""
     if not project_id or not str(project_id).strip():
+        projects = _get_projects()
+        if len(projects) == 1:
+            return projects[0]["id"]
         raise ValueError("必须提供 project_id。可用项目:\n" + _format_project_options())
 
     normalized = str(project_id).strip()
-    configured_ids = {project["id"] for project in _get_projects()}
+    projects = _get_projects()
+    for project in projects:
+        if normalized in (project["id"], project["name"]):
+            return project["id"]
+
+    configured_ids = {project["id"] for project in projects}
     if normalized not in configured_ids:
         raise ValueError(f"未配置的 project_id: {normalized}\n可用项目:\n{_format_project_options()}")
 
