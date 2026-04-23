@@ -530,6 +530,56 @@ class ProjectConfigTests(unittest.TestCase):
         self.assertIn("参数: 1", result)
         self.assertNotIn("components", result)
 
+    def test_find_api_endpoints_filters_path_method_and_tag(self):
+        os.environ["APIFOX_TOKEN"] = "token"
+        os.environ["APIFOX_PROJECTS"] = '[{"name":"主项目","id":"7575229"}]'
+        module = importlib.import_module("apifox_mcp.tools.api_tools")
+        openapi_data = make_openapi_fixture()
+        openapi_data["paths"]["/users"] = {
+            "get": {
+                "summary": "用户列表",
+                "description": "获取用户列表",
+                "tags": ["用户"],
+                "responses": {"200": {"description": "成功"}},
+            }
+        }
+
+        module._make_request = lambda *args, **kwargs: {"success": True, "data": deepcopy(openapi_data)}
+
+        result = module.find_api_endpoints(
+            project_id="7575229",
+            path="/orders",
+            method="POST",
+            tag="订单",
+        )
+
+        self.assertIn("[POST  ] /orders", result)
+        self.assertIn('"path": "/orders"', result)
+        self.assertNotIn("/users", result)
+        self.assertNotIn("components", result)
+
+    def test_get_api_endpoint_compact_detail_returns_edit_context_without_components(self):
+        os.environ["APIFOX_TOKEN"] = "token"
+        os.environ["APIFOX_PROJECTS"] = '[{"name":"主项目","id":"7575229"}]'
+        module = importlib.import_module("apifox_mcp.tools.api_tools")
+
+        module._make_request = lambda *args, **kwargs: {"success": True, "data": make_openapi_fixture()}
+
+        result = module.get_api_endpoint_compact_detail(
+            project_id="7575229",
+            path="/orders",
+            method="POST",
+        )
+
+        self.assertIn("接口紧凑详情: POST /orders", result)
+        self.assertIn("query.source", result)
+        self.assertIn("Schema: CreateOrderRequest", result)
+        self.assertIn("name (string", result)
+        self.assertIn("Schema: OrderResponse", result)
+        self.assertIn("status (string", result)
+        self.assertIn("Example:", result)
+        self.assertNotIn('"components"', result)
+
     def test_batch_patch_api_endpoint_titles_preserves_details(self):
         os.environ["APIFOX_TOKEN"] = "token"
         os.environ["APIFOX_PROJECTS"] = '[{"name":"主项目","id":"7575229"}]'

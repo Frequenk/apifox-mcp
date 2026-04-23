@@ -16,6 +16,8 @@
 
 *   **API 接口管理**:
     *   列出接口 (`list_api_endpoints`)
+    *   结构化搜索接口路径 (`find_api_endpoints`) - 按关键词、路径、方法、标签组合过滤
+    *   获取接口紧凑详情 (`get_api_endpoint_compact_detail`) - 返回修改所需上下文，不返回完整 components
     *   批量获取接口轻量摘要 (`batch_get_api_endpoint_summaries`) - 只返回名称、描述、标签、参数数量、响应码
     *   获取接口详情 (`get_api_endpoint_detail`)
     *   获取完整接口快照 (`get_api_endpoint_snapshot`) - 修改旧接口前建议先读取
@@ -327,8 +329,17 @@ docker run -i --rm --env-file .env apifox-mcp
 
 当只需要批量检查或修改标题、说明、标签时，优先使用轻量工具：
 
+- `find_api_endpoints`: 先按关键词、路径、方法、标签定位接口路径，返回结构化候选。
+- `get_api_endpoint_compact_detail`: 对确定的接口读取参数、请求体顶层字段、响应码、目标响应字段和示例，不返回完整 components。
 - `batch_get_api_endpoint_summaries`: 批量读取名称、描述、标签、参数数量、响应码，不返回完整 schema/components。
 - `get_api_endpoint_snapshot`: 只有准备做复杂修改或全量替换时再读取完整 operation 快照。
+
+推荐的接口文档维护流程：
+
+1. `find_api_endpoints` 查找接口路径。
+2. `get_api_endpoint_compact_detail` 查看接口详情。
+3. `patch_api_endpoint_operation` 或 `patch_api_endpoint_metadata` 执行修改。
+4. `get_api_endpoint_compact_detail` 再次确认结果。
 
 ### 局部修改优先
 

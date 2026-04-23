@@ -149,6 +149,84 @@ def _format_json(data: Dict[str, Any]) -> str:
     return json.dumps(data, ensure_ascii=False, indent=2)
 
 
+def _truncate_text(value: Any, limit: int = 1200) -> str:
+    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"...(已截断，原长度 {len(text)})"
+
+
+def _iter_api_operations(openapi_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    apis = []
+    for path, methods in (openapi_data.get("paths") or {}).items():
+        for method, operation in (methods or {}).items():
+            if method not in ["get", "post", "put", "delete", "patch", "head", "options"]:
+                continue
+            apis.append({
+                "method": method.upper(),
+                "path": path,
+                "summary": operation.get("summary", operation.get("operationId", "未命名")),
+                "description": operation.get("description", ""),
+                "tags": operation.get("tags", []),
+                "status": operation.get("x-apifox-status", "unknown"),
+                "operation": operation,
+            })
+    return apis
+
+
+def _format_schema_fields(schema: Optional[Dict[str, Any]], max_fields: int = 30) -> List[str]:
+    if not isinstance(schema, dict):
+        return ["   • 无"]
+
+    properties = schema.get("properties")
+    if not isinstance(properties, dict) or not properties:
+        schema_type = schema.get("type", "object")
+        return [f"   • 类型: {schema_type}"]
+
+    required = set(schema.get("required") or [])
+    lines = []
+    for index, (name, definition) in enumerate(properties.items()):
+        if index >= max_fields:
+            lines.append(f"   • ... 还有 {len(properties) - max_fields} 个字段未显示")
+            break
+        field_type = definition.get("type", "object") if isinstance(definition, dict) else "object"
+        if isinstance(field_type, list):
+            field_type = "|".join(str(item) for item in field_type)
+        required_mark = "必填" if name in required else "选填"
+        description = definition.get("description", "") if isinstance(definition, dict) else ""
+        line = f"   • {name} ({field_type}, {required_mark})"
+        if description:
+            line += f": {description}"
+        lines.append(line)
+
+    return lines or ["   • 无"]
+
+
+def _compact_parameters(operation: Dict[str, Any]) -> List[str]:
+    parameters = operation.get("parameters") or []
+    if not parameters:
+        return ["   • 无"]
+
+    lines = []
+    for parameter in parameters:
+        schema = parameter.get("schema") or {}
+        field_type = schema.get("type", "string")
+        required = "必填" if parameter.get("required") else "选填"
+        description = parameter.get("description", "")
+        line = f"   • {parameter.get('in', 'query')}.{parameter.get('name', '')} ({field_type}, {required})"
+        if description:
+            line += f": {description}"
+        lines.append(line)
+    return lines
+
+
+def _get_content_schema(
+    openapi_data: Dict[str, Any],
+    content: Dict[str, Any]
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    return _resolve_schema_for_patch(openapi_data, content)
+
+
 def _compact_spec_preview(openapi_spec: Dict[str, Any], path: str, method: str, changed_fields: Optional[List[str]] = None) -> str:
     operation = openapi_spec.get("paths", {}).get(path, {}).get(method.lower(), {})
     schemas = openapi_spec.get("components", {}).get("schemas", {})
@@ -419,6 +497,168 @@ def list_api_endpoints(
         output_lines.append(f"\n... 还有 {len(apis) - limit} 个接口未显示")
     
     return "\n".join(output_lines)
+
+
+@mcp.tool()
+def find_api_endpoints(
+    project_id: str,
+    keyword: Optional[str] = None,
+    path: Optional[str] = None,
+    method: Optional[str] = None,
+    tag: Optional[str] = None,
+    limit: int = 20
+) -> str:
+    """
+    结构化搜索接口路径，适合修改接口文档前先快速定位目标接口。
+
+    可按关键词、路径片段、HTTP 方法、标签组合过滤。
+    返回 method/path/summary/tags/status，不返回参数、响应和 components。
+    """
+    config_error = _validate_config(project_id)
+    if config_error:
+        return config_error
+    resolved_project_id = _resolve_project_id(project_id)
+
+    try:
+        openapi_data = _export_openapi(resolved_project_id)
+    except RuntimeError as exc:
+        return f"❌ 获取失败: {exc}"
+
+    keyword_lower = keyword.lower() if keyword else ""
+    path_lower = path.lower() if path else ""
+    method_upper = method.upper() if method else ""
+    tag_lower = tag.lower() if tag else ""
+
+    apis = []
+    for api in _iter_api_operations(openapi_data):
+        tags = [str(item) for item in api.get("tags", [])]
+        if method_upper and api["method"] != method_upper:
+            continue
+        if path_lower and path_lower not in api["path"].lower():
+            continue
+        if tag_lower and not any(tag_lower in item.lower() for item in tags):
+            continue
+        if keyword_lower:
+            haystack = " ".join([
+                api.get("path", ""),
+                api.get("summary", ""),
+                api.get("description", ""),
+                " ".join(tags),
+            ]).lower()
+            if keyword_lower not in haystack:
+                continue
+        apis.append({
+            "method": api["method"],
+            "path": api["path"],
+            "summary": api["summary"],
+            "tags": tags,
+            "status": api["status"],
+        })
+
+    output = [
+        f"🔎 接口搜索结果 (共 {len(apis)} 个，显示 {min(len(apis), limit)} 个)",
+        "=" * 70,
+    ]
+    if not apis:
+        output.append("📭 未找到匹配接口")
+        return "\n".join(output)
+
+    for api in apis[:limit]:
+        tags = ", ".join(api["tags"]) if api["tags"] else "无"
+        output.append(f"[{api['method']:6}] {api['path']:40} | {api['summary']} [{tags}]")
+
+    if len(apis) > limit:
+        output.append(f"... 还有 {len(apis) - limit} 个接口未显示")
+
+    output.append("")
+    output.append("结构化候选:")
+    output.append(_format_json(apis[:limit]))
+    return "\n".join(output)
+
+
+@mcp.tool()
+def get_api_endpoint_compact_detail(
+    project_id: str,
+    path: str,
+    method: str,
+    response_code: str = "200",
+    content_type: str = "application/json"
+) -> str:
+    """
+    获取接口紧凑详情，适合修改接口文档前查看可编辑上下文。
+
+    返回描述、标签、参数、请求体顶层字段、响应码、指定响应顶层字段和示例。
+    本工具不会返回完整 components，避免占用过多上下文。
+    """
+    config_error = _validate_config(project_id)
+    if config_error:
+        return config_error
+    resolved_project_id = _resolve_project_id(project_id)
+
+    try:
+        openapi_data = _export_openapi(resolved_project_id)
+        operation, _ = _get_operation(openapi_data, path, method)
+    except (RuntimeError, KeyError) as exc:
+        return f"❌ 获取失败: {exc}"
+
+    responses = operation.get("responses") or {}
+    request_content = (
+        operation
+        .get("requestBody", {})
+        .get("content", {})
+        .get(content_type, {})
+    )
+    request_schema, request_schema_name = _get_content_schema(openapi_data, request_content)
+
+    response_content = (
+        responses
+        .get(str(response_code), {})
+        .get("content", {})
+        .get(content_type, {})
+    )
+    response_schema, response_schema_name = _get_content_schema(openapi_data, response_content)
+    response_example = response_content.get("example")
+
+    output = [
+        f"📌 接口紧凑详情: {method.upper()} {path}",
+        "=" * 70,
+        f"名称: {operation.get('summary', '未命名')}",
+        f"标签: {', '.join(operation.get('tags', [])) or '无'}",
+        f"状态: {operation.get('x-apifox-status', 'unknown')}",
+        "描述:",
+        _truncate_text(operation.get("description", "") or "无", 1600),
+        "",
+        "参数:",
+        *_compact_parameters(operation),
+        "",
+        "请求体:",
+    ]
+
+    if request_content:
+        if request_schema_name:
+            output.append(f"   • Schema: {request_schema_name}")
+        output.extend(_format_schema_fields(request_schema))
+        if "example" in request_content:
+            output.append("   • Example: " + _truncate_text(request_content.get("example"), 1000))
+    else:
+        output.append("   • 无")
+
+    output.extend([
+        "",
+        f"响应码: {', '.join(sorted(responses.keys())) or '无'}",
+        f"{response_code} 响应:",
+    ])
+
+    if response_content:
+        if response_schema_name:
+            output.append(f"   • Schema: {response_schema_name}")
+        output.extend(_format_schema_fields(response_schema))
+        if response_example is not None:
+            output.append("   • Example: " + _truncate_text(response_example, 1200))
+    else:
+        output.append("   • 无 application/json 内容")
+
+    return "\n".join(output)
 
 
 @mcp.tool()
