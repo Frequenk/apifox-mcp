@@ -7,7 +7,7 @@
 ```bash
 claude mcp add-json apifox --scope user '{
   "command": "docker",
-  "args": ["run", "-i", "--rm", "-e", "APIFOX_TOKEN", "-e", "APIFOX_PROJECTS", "ghcr.io/frequenk/apifox-mcp:latest"],
+  "args": ["run", "--pull=always", "-i", "--rm", "-e", "APIFOX_TOKEN", "-e", "APIFOX_PROJECTS", "ghcr.io/frequenk/apifox-mcp:latest"],
   "env": {
     "APIFOX_TOKEN": "your_token_here",
     "APIFOX_PROJECTS": "[{\"name\":\"主项目\",\"id\":\"7575229\"}]"
@@ -28,7 +28,7 @@ claude mcp get apifox
 
 ## 3. 更新镜像
 
-`latest` 标签不会自动更新：
+使用 `--pull=always` 后，每次启动都会检查最新镜像；也可以手动更新：
 
 ```bash
 docker pull ghcr.io/frequenk/apifox-mcp:latest

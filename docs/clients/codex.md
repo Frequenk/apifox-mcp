@@ -8,7 +8,7 @@
 codex mcp add apifox \
   --env APIFOX_TOKEN="your_token_here" \
   --env APIFOX_PROJECTS='[{"name":"主项目","id":"7575229"}]' \
-  -- docker run -i --rm -e APIFOX_TOKEN -e APIFOX_PROJECTS ghcr.io/frequenk/apifox-mcp:latest
+  -- docker run --pull=always -i --rm -e APIFOX_TOKEN -e APIFOX_PROJECTS ghcr.io/frequenk/apifox-mcp:latest
 ```
 
 ## 2. 检查
@@ -20,7 +20,7 @@ codex mcp get apifox
 
 ## 3. 更新镜像
 
-`latest` 标签不会自动更新，需手动拉取：
+使用 `--pull=always` 后，每次启动 MCP 容器都会检查并拉取最新镜像。也可以手动拉取：
 
 ```bash
 docker pull ghcr.io/frequenk/apifox-mcp:latest

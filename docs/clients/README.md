@@ -11,7 +11,7 @@
 | opencode | `~/.config/opencode/opencode.json(.jsonc)` | [opencode.md](./opencode.md) |
 | Qoder CLI | `~/.qoder/settings.json` | [qodercli.md](./qodercli.md) |
 
-> 镜像统一使用 `ghcr.io/frequenk/apifox-mcp:latest`；`latest` 不会自动更新，更新方式见各文档「更新镜像」。
+> 镜像统一使用 `ghcr.io/frequenk/apifox-mcp:latest`，启动参数统一增加 `--pull=always`。
 
 ---
 
@@ -54,5 +54,5 @@ TOML（Codex）用单引号字符串则无需转义：`'[{"name":"主项目","id
 ### 5. 生效与校验
 
 - 所有客户端配置都是**启动时加载一次**，改完要**重启会话**；运行中的 MCP server / 容器不会刷新。
-- 改完用 MCP 工具 `check_apifox_config` 复核实际读到的项目数量与连接状态。
+- 改完用 MCP 工具 `get_apifox_status` 复核实际读到的项目数量与连接状态。
 - Qoder CLI 额外可用 `qodercli mcp get apifox`，其 `Status: ✓ Connected` 能直接确认握手成功。

@@ -1,0 +1,46 @@
+name: Live Apifox integration test
+
+on:
+  workflow_dispatch:
+    inputs:
+      project:
+        description: APIFOX_PROJECTS 中的测试项目名称
+        required: true
+        default: myself
+
+permissions:
+  contents: read
+
+jobs:
+  live-test:
+    runs-on: ubuntu-latest
+    env:
+      APIFOX_TOKEN: ${{ secrets.APIFOX_TOKEN }}
+      APIFOX_PROJECTS: ${{ secrets.APIFOX_PROJECTS }}
+      APIFOX_MCP_LIVE_TEST: "1"
+      APIFOX_MCP_LIVE_TEST_PROJECT: ${{ inputs.project }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.9.2"
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Run live read-write test
+        shell: bash
+        run: |
+          set -o pipefail
+          uv run pytest tests/test_live_myself.py -q | tee live-test-result.txt
+
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: apifox-live-test-result
+          path: live-test-result.txt

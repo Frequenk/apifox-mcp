@@ -89,33 +89,4 @@ class OperationLog:
         return self.log_dir / f"{log_id}.json"
 
 
-def _snapshot_endpoint(openapi_data: Dict[str, Any], path: str, method: str) -> Dict[str, Any]:
-    """从 OpenAPI 中提取接口 operation 快照。"""
-    method_lower = method.lower()
-    paths = openapi_data.get("paths", {})
-    if path not in paths:
-        raise KeyError(f"未找到路径为 {path} 的接口")
-    if method_lower not in paths[path]:
-        raise KeyError(f"未找到 {method.upper()} {path} 接口")
-    return copy.deepcopy(paths[path][method_lower])
-
-
-def _snapshot_schema(openapi_data: Dict[str, Any], name: str) -> Dict[str, Any]:
-    """从 OpenAPI 中提取 Schema 快照。"""
-    schemas = openapi_data.get("components", {}).get("schemas", {})
-    if name not in schemas:
-        raise KeyError(f"未找到名为 {name} 的数据模型")
-    return copy.deepcopy(schemas[name])
-
-
-def _snapshot_folder(openapi_data: Dict[str, Any], folder_name: str) -> Dict[str, Any]:
-    """从 OpenAPI tags 中提取目录快照。"""
-    for tag in openapi_data.get("tags", []):
-        if isinstance(tag, dict) and tag.get("name") == folder_name:
-            return copy.deepcopy(tag)
-        if tag == folder_name:
-            return {"name": folder_name}
-    raise KeyError(f"未找到目录: {folder_name}")
-
-
 operation_logger = OperationLog()

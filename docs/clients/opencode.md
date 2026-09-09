@@ -13,7 +13,7 @@
     "apifox": {
       "type": "local",
       "command": [
-        "docker", "run", "-i", "--rm",
+        "docker", "run", "--pull=always", "-i", "--rm",
         "-e", "APIFOX_TOKEN",
         "-e", "APIFOX_PROJECTS",
         "ghcr.io/frequenk/apifox-mcp:latest"
@@ -33,11 +33,11 @@
 ## 2. 生效与校验
 
 - opencode 启动时加载一次配置，不热重载；改完需**重启 opencode**。
-- 重启后在会话中调用 `check_apifox_config` 复核实际读到的项目数量与连接状态。
+- 重启后在会话中调用 `get_apifox_status` 复核实际读到的项目数量与连接状态。
 
 ## 3. 更新镜像
 
-`latest` 标签不会自动更新：
+使用 `--pull=always` 后，每次启动都会检查最新镜像；也可以手动更新：
 
 ```bash
 docker pull ghcr.io/frequenk/apifox-mcp:latest

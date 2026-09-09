@@ -1,0 +1,10 @@
+.git
+.github
+.venv
+.pytest_cache
+.ruff_cache
+.apifox-mcp-logs
+docs
+tests
+__pycache__
+*.pyc

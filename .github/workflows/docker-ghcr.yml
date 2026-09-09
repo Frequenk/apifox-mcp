@@ -18,8 +18,31 @@ env:
   REGISTRY: ghcr.io
 
 jobs:
+  test:
+    name: Unit and contract tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.9.2"
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Run tests
+        run: uv run pytest -q
+
+      - name: Check code style
+        run: uv run ruff check apifox_mcp tests && uv run ruff format --check apifox_mcp tests
+
   build:
     name: Build Docker image
+    needs: test
     runs-on: ubuntu-latest
 
     steps:
