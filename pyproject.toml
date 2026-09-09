@@ -1,6 +1,6 @@
 [project]
 name = "apifox-mcp"
-version = "2.0.0"
+version = "2.1.0"
 description = "A Model Context Protocol (MCP) server for managing Apifox projects through LLMs"
 readme = "README.md"
 requires-python = ">=3.10"

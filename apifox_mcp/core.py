@@ -20,6 +20,18 @@ HTTP_METHODS = {"get", "post", "put", "delete", "patch", "head", "options"}
 class ApifoxError(RuntimeError):
     """Apifox 调用或文档处理失败。"""
 
+    def __init__(
+        self,
+        message: str,
+        code: str = "tool_error",
+        details: Optional[Dict[str, Any]] = None,
+        recovery: Optional[str] = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.details = details
+        self.recovery = recovery
+
 
 @dataclass
 class RequestMetrics:
@@ -139,8 +151,29 @@ class OpenApiRepository:
 
     def cache_state(self) -> Dict[str, Any]:
         now = time.time()
+        return {project_id: self.cache_summary(project_id, now=now) for project_id in self._cache}
+
+    def cache_summary(self, project_id: str, now: Optional[float] = None) -> Dict[str, Any]:
+        cached = self._cache.get(project_id)
+        if not cached:
+            return {"available": False, "fresh": False}
+        saved_at, document = cached
+        current_time = time.time() if now is None else now
+        age_seconds = max(0.0, current_time - saved_at)
+        endpoint_count = sum(
+            1
+            for path_item in document.get("paths", {}).values()
+            if isinstance(path_item, dict)
+            for method in path_item
+            if method.lower() in HTTP_METHODS
+        )
         return {
-            project_id: {"age_seconds": round(now - saved_at, 3)} for project_id, (saved_at, _) in self._cache.items()
+            "available": True,
+            "fresh": age_seconds <= self.cache_ttl,
+            "age_seconds": round(age_seconds, 3),
+            "title": document.get("info", {}).get("title", ""),
+            "endpoint_count": endpoint_count,
+            "schema_count": len(document.get("components", {}).get("schemas", {})),
         }
 
 
@@ -176,7 +209,7 @@ def dependency_closure(document: Dict[str, Any], seeds: Iterable[str]) -> Dict[s
             continue
         result[name] = copy.deepcopy(schema)
         pending.extend(ref for ref in iter_refs(schema) if ref not in seen)
-    return result
+    return {name: result[name] for name in sorted(result)}
 
 
 def missing_refs(value: Any, schemas: Dict[str, Any]) -> List[str]:
@@ -278,7 +311,7 @@ def build_minimal_spec(
     components = dependency_closure(document, seed_refs)
     spec: Dict[str, Any] = {
         "openapi": "3.1.0",
-        "info": copy.deepcopy(document.get("info") or {"title": "Apifox MCP", "version": "2.0.0"}),
+        "info": copy.deepcopy(document.get("info") or {"title": "Apifox MCP", "version": "2.1.0"}),
         "paths": paths,
     }
     if components:

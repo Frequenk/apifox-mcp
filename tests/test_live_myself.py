@@ -84,13 +84,22 @@ def test_myself_real_read_write_roundtrip(tmp_path, monkeypatch):
         )
         assert bootstrap["ok"], bootstrap
 
+    status = v2_tools.get_apifox_status(project_id=project)
+    assert status["ok"] is True
+    assert status["probe_performed"] is False
+    assert status["metrics"]["request_count"] == 0
+
     before = v2_tools.read_api_documents(
         project_id=project,
         endpoints=[{"path": "/mcp-tests/document-sync", "method": "GET"}],
+        schemas=["McpIntegrationItem", "McpIntegrationResponse"],
         force_refresh=True,
     )
+    assert set(before["components"]["schemas"]) == {"McpIntegrationItem", "McpIntegrationResponse"}
+    assert all("components" not in item and "schemas" not in item for item in before["documents"])
+    assert before["output_chars"] <= 2120
     before_operation = copy.deepcopy(before["documents"][0]["operation"])
-    before_item = copy.deepcopy(before["documents"][0]["components"]["schemas"]["McpIntegrationItem"])
+    before_item = copy.deepcopy(before["components"]["schemas"]["McpIntegrationItem"])
 
     try:
         changed = v2_tools.apply_api_document_changes(
@@ -129,7 +138,7 @@ def test_myself_real_read_write_roundtrip(tmp_path, monkeypatch):
             endpoints=[{"path": "/mcp-tests/document-sync", "method": "GET"}],
             force_refresh=True,
         )
-        schemas = read_back["documents"][0]["components"]["schemas"]
+        schemas = read_back["components"]["schemas"]
         assert schemas["McpIntegrationResponse"]["properties"]["items"]["items"]["$ref"].endswith("McpIntegrationItem")
         assert schemas["McpIntegrationItem"]["properties"]["probe"]["description"].endswith("（changed）")
     finally:

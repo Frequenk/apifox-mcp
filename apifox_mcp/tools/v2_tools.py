@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import Annotated, Any, Dict, List, Literal, Optional, Tuple
 
 from jsonschema import Draft202012Validator
 from pydantic import BaseModel, Field
@@ -187,30 +187,63 @@ def _pointer_exists(value: Any, pointer: str) -> bool:
 
 
 @mcp.tool()
-def get_apifox_status() -> Dict[str, Any]:
-    """检查连接并返回可用项目；开始使用前调用。"""
+def get_apifox_status(
+    project_id: Annotated[str, Field(description="可选项目名称或 ID；probe=true 时优先指定")] = "",
+    probe: Annotated[bool, Field(description="是否强制访问 Apifox 验证连接；默认仅检查配置和缓存")] = False,
+) -> Dict[str, Any]:
+    """返回项目配置和缓存状态；probe=true 时强制执行真实连接检查。"""
     repository.client.reset_metrics()
     if not APIFOX_TOKEN:
         return {"ok": False, "error": {"code": "missing_token", "message": "缺少 APIFOX_TOKEN"}}
 
+    try:
+        configured_projects = _get_projects()
+    except ValueError as exc:
+        return {"ok": False, "error": {"code": "invalid_projects", "message": str(exc)}, "metrics": _metrics()}
+    if not configured_projects:
+        return {
+            "ok": False,
+            "error": {"code": "missing_projects", "message": "缺少 APIFOX_PROJECTS"},
+            "metrics": _metrics(),
+        }
+    if project_id:
+        resolved = _project_id(project_id)
+        configured_projects = [item for item in configured_projects if item["id"] == resolved]
+
     projects = []
-    for configured in _get_projects():
-        try:
-            document, cache_hit = repository.export(configured["id"])
-            projects.append(
-                {
-                    **configured,
-                    "connected": True,
-                    "title": document.get("info", {}).get("title", configured["name"]),
-                    "endpoint_count": sum(1 for _ in _iter_operations(document)),
-                    "schema_count": len(document.get("components", {}).get("schemas", {})),
-                    "cache_hit": cache_hit,
-                }
-            )
-        except ApifoxError as exc:
-            projects.append({**configured, "connected": False, "error": str(exc)})
+    for configured in configured_projects:
+        if probe:
+            try:
+                repository.export(configured["id"], force=True)
+                projects.append(
+                    {
+                        **configured,
+                        "connection_status": "connected",
+                        "cache": repository.cache_summary(configured["id"]),
+                    }
+                )
+            except ApifoxError as exc:
+                projects.append(
+                    {
+                        **configured,
+                        "connection_status": "error",
+                        "cache": repository.cache_summary(configured["id"]),
+                        "error": str(exc),
+                    }
+                )
+            continue
+
+        cache = repository.cache_summary(configured["id"])
+        projects.append(
+            {
+                **configured,
+                "connection_status": "cached" if cache["available"] else "not_checked",
+                "cache": cache,
+            }
+        )
     return {
-        "ok": all(project.get("connected") for project in projects),
+        "ok": all(project.get("connection_status") != "error" for project in projects),
+        "probe_performed": probe,
         "api": {"base_url": APIFOX_PUBLIC_API, "version": APIFOX_API_VERSION},
         "projects": projects,
         "metrics": _metrics(),
@@ -294,7 +327,10 @@ def read_api_documents(
     schemas: Optional[List[str]] = None,
     sections: Optional[List[str]] = None,
     include_examples: bool = True,
-    field_paths: Optional[List[str]] = None,
+    field_paths: Annotated[
+        Optional[List[str]],
+        Field(description="基于完整结果根节点的 JSON Pointer 列表；启用后仅返回 selections"),
+    ] = None,
     force_refresh: bool = False,
     cursor: int = 0,
     max_output_chars: int = 80000,
@@ -304,6 +340,7 @@ def read_api_documents(
     resolved = _project_id(project_id)
     document, cache_hit = repository.export(resolved, force=force_refresh and cursor == 0)
     output_documents: List[Dict[str, Any]] = []
+    seed_refs: List[str] = []
     endpoints = _dict_items(endpoints)
 
     for target in endpoints or []:
@@ -311,40 +348,42 @@ def read_api_documents(
         method = str(target.get("method", "GET")).lower()
         operation = _operation(document, path, method)
         selected = select_operation_sections(operation, sections)
-        closure = dependency_closure(document, iter_refs(selected))
+        seed_refs.extend(iter_refs(selected))
         item: Dict[str, Any] = {
             "target": {"resource_type": "endpoint", "path": path, "method": method.upper()},
             "revision": canonical_hash(operation),
             "operation": selected,
-            "components": {"schemas": closure},
         }
-        output_documents.append(item if include_examples else strip_examples(item))
+        output_documents.append(item)
 
     for name in schemas or []:
         schema = document.get("components", {}).get("schemas", {}).get(name)
         if schema is None:
             raise ApifoxError(f"未找到 Schema: {name}")
-        closure = dependency_closure(document, [name])
+        seed_refs.append(name)
         item = {
             "target": {"resource_type": "schema", "name": name},
             "revision": canonical_hash(schema),
-            "schemas": closure,
+            "schema": {"$ref": f"#/components/schemas/{name}"},
         }
-        output_documents.append(item if include_examples else strip_examples(item))
+        output_documents.append(item)
+
+    payload: Dict[str, Any] = {
+        "ok": True,
+        "documents": output_documents,
+        "components": {"schemas": dependency_closure(document, seed_refs)},
+    }
+    if not include_examples:
+        payload = strip_examples(payload)
 
     if field_paths:
         selected_values = []
         for pointer in field_paths:
             try:
-                selected_values.append({"path": pointer, "value": json_pointer_get(output_documents, pointer)})
+                selected_values.append({"path": pointer, "value": json_pointer_get(payload, pointer)})
             except (KeyError, IndexError, TypeError, ValueError):
                 selected_values.append({"path": pointer, "error": "路径不存在"})
-        output_documents = selected_values
-
-    payload = {
-        "ok": True,
-        "documents": output_documents,
-    }
+        payload = {"ok": True, "selections": selected_values}
     serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     limit = max(10000, min(max_output_chars, 200000))
     if len(serialized) <= limit and cursor == 0:
@@ -397,8 +436,20 @@ def _apply_resource_changes(
             if current is None:
                 raise ApifoxError(f"接口不存在，不能 patch: {method.upper()} {path}")
             expected_revision = change.get("expected_revision")
-            if expected_revision and expected_revision != canonical_hash(current):
-                raise ApifoxError(f"接口已发生并发变化: {method.upper()} {path}")
+            actual_revision = canonical_hash(current)
+            if expected_revision and expected_revision != actual_revision:
+                raise ApifoxError(
+                    f"接口已发生并发变化: {method.upper()} {path}",
+                    code="revision_conflict",
+                    details={
+                        "resource_type": "endpoint",
+                        "path": path,
+                        "method": method.upper(),
+                        "expected_revision": expected_revision,
+                        "actual_revision": actual_revision,
+                    },
+                    recovery="重新调用 read_api_documents 获取最新 revision，合并变更后重试",
+                )
             updated = copy.deepcopy(current)
             deep_merge(updated, change.get("patch") or {})
             for pointer in change.get("remove_paths") or []:
@@ -425,8 +476,19 @@ def _apply_resource_changes(
             if current is None:
                 raise ApifoxError(f"Schema 不存在，不能 patch: {name}")
             expected_revision = change.get("expected_revision")
-            if expected_revision and expected_revision != canonical_hash(current):
-                raise ApifoxError(f"Schema 已发生并发变化: {name}")
+            actual_revision = canonical_hash(current)
+            if expected_revision and expected_revision != actual_revision:
+                raise ApifoxError(
+                    f"Schema 已发生并发变化: {name}",
+                    code="revision_conflict",
+                    details={
+                        "resource_type": "schema",
+                        "name": name,
+                        "expected_revision": expected_revision,
+                        "actual_revision": actual_revision,
+                    },
+                    recovery="重新调用 read_api_documents 获取最新 revision，合并变更后重试",
+                )
             updated = copy.deepcopy(current)
             deep_merge(updated, change.get("patch") or {})
             for pointer in change.get("remove_paths") or []:

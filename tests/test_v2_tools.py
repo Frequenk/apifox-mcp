@@ -21,9 +21,45 @@ def test_read_documents_returns_only_reachable_components(monkeypatch, tmp_path,
         endpoints=[{"path": "/orders", "method": "GET"}],
     )
 
-    schemas = result["documents"][0]["components"]["schemas"]
+    schemas = result["components"]["schemas"]
     assert set(schemas) == {"OrderResponse", "OrderItem"}
+    assert "components" not in result["documents"][0]
     assert result["output_chars"] < 10000
+
+
+def test_read_documents_deduplicates_shared_components(monkeypatch, tmp_path, fixture_document):
+    setup_tools(monkeypatch, tmp_path, fixture_document)
+
+    result = v2_tools.read_api_documents(
+        project_id="1",
+        endpoints=[{"path": "/orders", "method": "GET"}],
+        schemas=["OrderItem", "OrderResponse"],
+    )
+
+    assert set(result["components"]["schemas"]) == {"OrderItem", "OrderResponse"}
+    assert result["documents"][1]["schema"] == {"$ref": "#/components/schemas/OrderItem"}
+    assert result["documents"][2]["schema"] == {"$ref": "#/components/schemas/OrderResponse"}
+    assert all("schemas" not in document for document in result["documents"])
+
+
+def test_read_documents_field_paths_use_result_root(monkeypatch, tmp_path, fixture_document):
+    setup_tools(monkeypatch, tmp_path, fixture_document)
+
+    result = v2_tools.read_api_documents(
+        project_id="1",
+        endpoints=[{"path": "/orders", "method": "GET"}],
+        field_paths=[
+            "/documents/0/operation/summary",
+            "/components/schemas/OrderItem/properties/id/type",
+            "/missing",
+        ],
+    )
+
+    assert result["selections"] == [
+        {"path": "/documents/0/operation/summary", "value": "订单列表"},
+        {"path": "/components/schemas/OrderItem/properties/id/type", "value": "integer"},
+        {"path": "/missing", "error": "路径不存在"},
+    ]
 
 
 def test_read_documents_supports_pagination(monkeypatch, tmp_path, fixture_document):
@@ -201,7 +237,55 @@ def test_apply_rejects_stale_revision(monkeypatch, tmp_path, fixture_document):
     )
 
     assert result["ok"] is False
-    assert "并发变化" in result["error"]["message"]
+    assert result["error"]["code"] == "revision_conflict"
+    assert result["error"]["details"]["resource_type"] == "schema"
+    assert result["error"]["details"]["expected_revision"] == "stale"
+    assert result["error"]["details"]["actual_revision"]
+    assert "read_api_documents" in result["error"]["recovery"]
+
+
+def test_status_defaults_to_zero_requests(monkeypatch, tmp_path, fixture_document):
+    fake = setup_tools(monkeypatch, tmp_path, fixture_document)
+    monkeypatch.setattr(v2_tools, "APIFOX_TOKEN", "token")
+    monkeypatch.setattr(v2_tools, "_get_projects", lambda: [{"name": "test", "id": "1"}])
+
+    result = v2_tools.get_apifox_status()
+
+    assert result["ok"] is True
+    assert result["probe_performed"] is False
+    assert result["projects"][0]["connection_status"] == "not_checked"
+    assert result["metrics"]["request_count"] == 0
+    assert fake.export_count == 0
+
+
+def test_status_rejects_missing_projects_without_request(monkeypatch, tmp_path, fixture_document):
+    fake = setup_tools(monkeypatch, tmp_path, fixture_document)
+    monkeypatch.setattr(v2_tools, "APIFOX_TOKEN", "token")
+    monkeypatch.setattr(v2_tools, "_get_projects", lambda: [])
+
+    result = v2_tools.get_apifox_status()
+
+    assert result["error"]["code"] == "missing_projects"
+    assert result["metrics"]["request_count"] == 0
+    assert fake.export_count == 0
+
+
+def test_status_probe_only_exports_selected_project(monkeypatch, tmp_path, fixture_document):
+    fake = setup_tools(monkeypatch, tmp_path, fixture_document)
+    monkeypatch.setattr(v2_tools, "APIFOX_TOKEN", "token")
+    monkeypatch.setattr(
+        v2_tools,
+        "_get_projects",
+        lambda: [{"name": "test", "id": "1"}, {"name": "other", "id": "2"}],
+    )
+
+    result = v2_tools.get_apifox_status(project_id="test", probe=True)
+
+    assert result["ok"] is True
+    assert result["probe_performed"] is True
+    assert result["projects"][0]["connection_status"] == "connected"
+    assert result["projects"][0]["cache"]["available"] is True
+    assert fake.export_count == 1
 
 
 def test_apply_rejects_example_that_does_not_match_schema(monkeypatch, tmp_path, fixture_document):

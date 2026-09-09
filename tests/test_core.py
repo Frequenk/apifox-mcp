@@ -2,6 +2,7 @@ import pytest
 
 from apifox_mcp.core import (
     ApifoxError,
+    OpenApiRepository,
     build_minimal_spec,
     deep_merge,
     dependency_closure,
@@ -9,6 +10,22 @@ from apifox_mcp.core import (
     remove_json_pointer,
     subset_mismatches,
 )
+
+
+def test_cache_summary_returns_metadata_without_request(fixture_document):
+    repository = OpenApiRepository()
+    repository._cache["1"] = (100.0, fixture_document)
+
+    summary = repository.cache_summary("1", now=150.0)
+
+    assert summary == {
+        "available": True,
+        "fresh": True,
+        "age_seconds": 50.0,
+        "title": "测试项目",
+        "endpoint_count": 1,
+        "schema_count": 3,
+    }
 
 
 def test_dependency_closure_only_contains_transitive_refs(fixture_document):
@@ -26,7 +43,7 @@ def test_dependency_closure_handles_cycles(fixture_document):
         }
     )
 
-    assert set(dependency_closure(fixture_document, ["A"])) == {"A", "B"}
+    assert list(dependency_closure(fixture_document, ["A"])) == ["A", "B"]
 
 
 def test_missing_refs_reports_unresolved_reference(fixture_document):

@@ -71,17 +71,20 @@ class FakeRepository:
         self.strip_nested_ref = strip_nested_ref
         self.export_count = 0
         self.import_count = 0
+        self.cache_available = False
         self.client = type("FakeClient", (), {})()
         self.client.metrics = RequestMetrics()
         self.client.reset_metrics = lambda: setattr(self.client, "metrics", RequestMetrics())
 
     def export(self, project_id, force=False):
         self.export_count += 1
+        self.cache_available = True
         self.client.metrics.request_count += 1
         return copy.deepcopy(self.document), False
 
     def import_spec(self, project_id, spec):
         self.import_count += 1
+        self.cache_available = False
         self.client.metrics.request_count += 1
         for path, item in spec.get("paths", {}).items():
             self.document.setdefault("paths", {}).setdefault(path, {}).update(copy.deepcopy(item))
@@ -99,6 +102,18 @@ class FakeRepository:
 
     def cache_state(self):
         return {}
+
+    def cache_summary(self, project_id):
+        if not self.cache_available:
+            return {"available": False, "fresh": False}
+        return {
+            "available": True,
+            "fresh": True,
+            "age_seconds": 0.0,
+            "title": self.document["info"]["title"],
+            "endpoint_count": 1,
+            "schema_count": len(self.document["components"]["schemas"]),
+        }
 
 
 @pytest.fixture

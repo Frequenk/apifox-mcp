@@ -4,7 +4,7 @@
 
 ## 核心能力
 
-- `get_apifox_status`：检查连接与项目。
+- `get_apifox_status`：零请求读取项目配置与缓存状态，按需真实探活。
 - `search_api_documents`：统一搜索接口和 Schema。
 - `read_api_documents`：批量读取目标及其传递依赖，支持字段筛选和分页。
 - `apply_api_document_changes`：一次导入多个接口、Schema 和目录变更，并自动回读校验。
@@ -13,6 +13,26 @@
 - `undo_change`：恢复可恢复的分组写入。
 
 推荐流程：搜索目标、批量读取、一次提交全部变更。写入工具已经包含强制回读，无需成功后再次读取。
+
+`get_apifox_status` 默认不会访问 Apifox；排查连接时传 `probe=true`，并优先指定 `project_id`，避免导出无关项目。
+
+`read_api_documents` 的所有目标共享顶层 `components.schemas`，Schema 文档通过 `$ref` 指向该区域，避免重复返回依赖：
+
+```json
+{
+  "documents": [
+    {"target": {"resource_type": "endpoint"}, "revision": "...", "operation": {}},
+    {
+      "target": {"resource_type": "schema", "name": "Order"},
+      "revision": "...",
+      "schema": {"$ref": "#/components/schemas/Order"}
+    }
+  ],
+  "components": {"schemas": {"Order": {}}}
+}
+```
+
+`field_paths` 使用以上结果为根节点，例如 `/documents/0/operation/summary` 或 `/components/schemas/Order/properties/id`。
 
 ## 写入语义
 
